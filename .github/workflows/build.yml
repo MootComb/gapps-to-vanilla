@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Specific release tag (leave empty for latest)'
+        description: 'Specific release tag (leave empty for latest VANILLA)'
         required: false
         default: ''
 
@@ -33,41 +33,41 @@ jobs:
         sudo cp simg2img img2simg /usr/local/bin/
         cd ..
     
-    - name: Get latest release
+    - name: Get latest VANILLA release
       id: latest_release
       run: |
         if [ -z "${{ github.event.inputs.release_tag }}" ]; then
-          RELEASE_URL="https://api.github.com/repos/Doze-off/ProjectInfinity-X_gsi/releases/latest"
-          RELEASE_DATA=$(curl -s $RELEASE_URL)
-          DOWNLOAD_URL=$(echo "$RELEASE_DATA" | grep -o 'https://github.com/Doze-off/ProjectInfinity-X_gsi/releases/download/[^"]*\.xz' | head -1)
-          RELEASE_TAG=$(echo "$RELEASE_DATA" | grep '"tag_name":' | cut -d'"' -f4)
+          # Get all releases and filter for VANILLA
+          RELEASES_URL="https://api.github.com/repos/Doze-off/ProjectInfinity-X_gsi/releases"
+          ALL_RELEASES=$(curl -s $RELEASES_URL)
+          
+          # Find the first VANILLA release
+          DOWNLOAD_URL=$(echo "$ALL_RELEASES" | grep -o 'https://github.com/Doze-off/ProjectInfinity-X_gsi/releases/download/[^"]*VANILLA[^"]*\.xz' | head -1)
+          RELEASE_TAG=$(echo "$DOWNLOAD_URL" | grep -o 'download/[^/]*/' | cut -d'/' -f2)
         else
           DOWNLOAD_URL="https://github.com/Doze-off/ProjectInfinity-X_gsi/releases/download/${{ github.event.inputs.release_tag }}/Infinity-X-*_GSI_treble_arm64-ab-VANILLA-Official-*.img.xz"
           RELEASE_TAG="${{ github.event.inputs.release_tag }}"
         fi
         
+        if [ -z "$DOWNLOAD_URL" ]; then
+          echo "❌ No VANILLA release found!"
+          exit 1
+        fi
+        
         echo "download_url=${DOWNLOAD_URL}" >> $GITHUB_OUTPUT
         echo "release_tag=${RELEASE_TAG}" >> $GITHUB_OUTPUT
+        FILENAME=$(basename "$DOWNLOAD_URL")
+        echo "filename=${FILENAME}" >> $GITHUB_OUTPUT
         
-        if [ -z "${{ github.event.inputs.release_tag }}" ]; then
-          FILENAME=$(basename "$DOWNLOAD_URL")
-          echo "filename=${FILENAME}" >> $GITHUB_OUTPUT
-        fi
+        echo "Found VANILLA release: ${RELEASE_TAG}"
+        echo "Download URL: ${DOWNLOAD_URL}"
     
     - name: Download Vanilla GSI
       run: |
         mkdir -p vanilla_image
         cd vanilla_image
-        
-        if [ -n "${{ steps.latest_release.outputs.filename }}" ]; then
-          wget "${{ steps.latest_release.outputs.download_url }}" -O "${{ steps.latest_release.outputs.filename }}"
-          XZ_FILE="${{ steps.latest_release.outputs.filename }}"
-        else
-          wget "${{ steps.latest_release.outputs.download_url }}" -O vanilla.xz
-          XZ_FILE="vanilla.xz"
-        fi
-        
-        echo "XZ_FILE=${XZ_FILE}" >> $GITHUB_ENV
+        wget "${{ steps.latest_release.outputs.download_url }}" -O "${{ steps.latest_release.outputs.filename }}"
+        echo "XZ_FILE=${{ steps.latest_release.outputs.filename }}" >> $GITHUB_ENV
     
     - name: Extract XZ to IMG
       run: |
@@ -136,7 +136,16 @@ jobs:
         done
         cp vanilla_extracted/system_ext/etc/aconfig_flags.pb vanilla/system_ext/etc/ 2>/dev/null || true
         
-        echo "Vanilla components extracted successfully"
+        # Check if we have any files
+        echo "Extracted files:"
+        find vanilla -type f | head -20
+        
+        if [ ! -d "vanilla/priv-app" ] || [ -z "$(ls -A vanilla/priv-app 2>/dev/null)" ]; then
+          echo "❌ No files extracted! Wrong image type?"
+          exit 1
+        fi
+        
+        echo "✓ Vanilla components extracted successfully"
     
     - name: Run gapps-to-vanilla script
       run: |
@@ -159,24 +168,17 @@ jobs:
           
           **Convert GAPPS to Vanilla AOSP**
           
-          Built from: ${{ steps.latest_release.outputs.download_url }}
+          Built from VANILLA image: ${{ steps.latest_release.outputs.download_url }}
           
           ### What it does:
           - ❌ Removes all Google apps and services (GAPPS)
           - ✅ Restores original AOSP components
-          - 🧹 Cleans cache and temporary files
           
           ### Installation:
           1. Download `gapps-to-vanilla.zip`
           2. Boot to recovery (TWRP/OrangeFox)
           3. Install the ZIP file
           4. Reboot system
-          
-          ### Components restored:
-          - AOSP apps (DeskClock, Calculator, Contacts, LatinIME, webview)
-          - System services (Provision, ThemePicker, Updater, PackageInstaller)
-          - Config files and permissions
-          - NOTICE.xml.gz and aconfig files
           
           📅 Built: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
         files: |
