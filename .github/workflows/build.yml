@@ -1,0 +1,187 @@
+name: gapps-to-vanilla
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Specific release tag (leave empty for latest)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y xz-utils wget unzip e2fsprogs
+        
+        git clone https://github.com/anestisb/android-simg2img.git
+        cd android-simg2img
+        make
+        sudo cp simg2img img2simg /usr/local/bin/
+        cd ..
+    
+    - name: Get latest release
+      id: latest_release
+      run: |
+        if [ -z "${{ github.event.inputs.release_tag }}" ]; then
+          RELEASE_URL="https://api.github.com/repos/Doze-off/ProjectInfinity-X_gsi/releases/latest"
+          RELEASE_DATA=$(curl -s $RELEASE_URL)
+          DOWNLOAD_URL=$(echo "$RELEASE_DATA" | grep -o 'https://github.com/Doze-off/ProjectInfinity-X_gsi/releases/download/[^"]*\.xz' | head -1)
+          RELEASE_TAG=$(echo "$RELEASE_DATA" | grep '"tag_name":' | cut -d'"' -f4)
+        else
+          DOWNLOAD_URL="https://github.com/Doze-off/ProjectInfinity-X_gsi/releases/download/${{ github.event.inputs.release_tag }}/Infinity-X-*_GSI_treble_arm64-ab-VANILLA-Official-*.img.xz"
+          RELEASE_TAG="${{ github.event.inputs.release_tag }}"
+        fi
+        
+        echo "download_url=${DOWNLOAD_URL}" >> $GITHUB_OUTPUT
+        echo "release_tag=${RELEASE_TAG}" >> $GITHUB_OUTPUT
+        
+        if [ -z "${{ github.event.inputs.release_tag }}" ]; then
+          FILENAME=$(basename "$DOWNLOAD_URL")
+          echo "filename=${FILENAME}" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Download Vanilla GSI
+      run: |
+        mkdir -p vanilla_image
+        cd vanilla_image
+        
+        if [ -n "${{ steps.latest_release.outputs.filename }}" ]; then
+          wget "${{ steps.latest_release.outputs.download_url }}" -O "${{ steps.latest_release.outputs.filename }}"
+          XZ_FILE="${{ steps.latest_release.outputs.filename }}"
+        else
+          wget "${{ steps.latest_release.outputs.download_url }}" -O vanilla.xz
+          XZ_FILE="vanilla.xz"
+        fi
+        
+        echo "XZ_FILE=${XZ_FILE}" >> $GITHUB_ENV
+    
+    - name: Extract XZ to IMG
+      run: |
+        cd vanilla_image
+        xz -d -v "${{ env.XZ_FILE }}"
+        IMG_FILE="${XZ_FILE%.xz}"
+        echo "IMG_FILE=${IMG_FILE}" >> $GITHUB_ENV
+    
+    - name: Convert sparse to raw
+      run: |
+        cd vanilla_image
+        if file "${{ env.IMG_FILE }}" | grep -q "Android sparse image"; then
+          simg2img "${{ env.IMG_FILE }}" raw.img
+          export RAW_IMG="raw.img"
+        else
+          export RAW_IMG="${{ env.IMG_FILE }}"
+        fi
+        echo "RAW_IMG=${RAW_IMG}" >> $GITHUB_ENV
+    
+    - name: Mount and extract system
+      run: |
+        mkdir -p system_mount vanilla_extracted
+        
+        sudo mkdir -p /mnt/vanilla
+        sudo mount -o loop,ro vanilla_image/${{ env.RAW_IMG }} /mnt/vanilla
+        
+        sudo cp -a /mnt/vanilla/* vanilla_extracted/
+        
+        sudo umount /mnt/vanilla
+        
+        if [ -d "vanilla_extracted/system" ] && [ -d "vanilla_extracted/system/system" ]; then
+          mv vanilla_extracted/system/system/* vanilla_extracted/
+          rm -rf vanilla_extracted/system
+        fi
+        
+        mkdir -p vanilla
+        cp -r vanilla_extracted/system_ext/priv-app vanilla/ 2>/dev/null || true
+        cp -r vanilla_extracted/product/app vanilla/product/ 2>/dev/null || true
+        cp -r vanilla_extracted/product/priv-app vanilla/product/ 2>/dev/null || true
+        cp -r vanilla_extracted/system/system/app vanilla/system/ 2>/dev/null || true
+        cp -r vanilla_extracted/system/system/priv-app vanilla/system/ 2>/dev/null || true
+        cp -r vanilla_extracted/system_ext/etc vanilla/system_ext/ 2>/dev/null || true
+        cp -r vanilla_extracted/product/etc vanilla/product/ 2>/dev/null || true
+        cp -r vanilla_extracted/product/lib64 vanilla/product/ 2>/dev/null || true
+        
+        mkdir -p vanilla/product/etc/default-permissions
+        mkdir -p vanilla/product/etc/permissions
+        mkdir -p vanilla/product/etc/sysconfig
+        mkdir -p vanilla/system_ext/etc/aconfig
+        
+        cp vanilla_extracted/product/etc/default-permissions/com.android.deskclock_default-permissions.xml vanilla/product/etc/default-permissions/ 2>/dev/null || true
+        cp vanilla_extracted/product/etc/permissions/com.android.contacts.xml vanilla/product/etc/permissions/ 2>/dev/null || true
+        cp vanilla_extracted/product/etc/sysconfig/com.android.deskclock_allowlist.xml vanilla/product/etc/sysconfig/ 2>/dev/null || true
+        cp vanilla_extracted/product/lib64/libjni_latinime.so vanilla/product/lib64/ 2>/dev/null || true
+        
+        cp vanilla_extracted/system_ext/etc/permissions/android.software.theme_picker.xml vanilla/system_ext/etc/permissions/ 2>/dev/null || true
+        cp vanilla_extracted/system_ext/etc/permissions/com.android.provision.xml vanilla/system_ext/etc/permissions/ 2>/dev/null || true
+        cp vanilla_extracted/system_ext/etc/permissions/com.android.statementservice.xml vanilla/system_ext/etc/permissions/ 2>/dev/null || true
+        
+        cp vanilla_extracted/product/etc/NOTICE.xml.gz vanilla/product/etc/ 2>/dev/null || true
+        cp vanilla_extracted/system/etc/NOTICE.xml.gz vanilla/system/etc/ 2>/dev/null || true
+        cp vanilla_extracted/system_ext/etc/NOTICE.xml.gz vanilla/system_ext/etc/ 2>/dev/null || true
+        
+        for file in flag.info flag.map flag.val package.map; do
+          cp vanilla_extracted/system_ext/etc/aconfig/$file vanilla/system_ext/etc/aconfig/ 2>/dev/null || true
+        done
+        cp vanilla_extracted/system_ext/etc/aconfig_flags.pb vanilla/system_ext/etc/ 2>/dev/null || true
+        
+        echo "Vanilla components extracted successfully"
+    
+    - name: Run gapps-to-vanilla script
+      run: |
+        chmod +x scripts/gapps-to-vanilla.sh
+        ./scripts/gapps-to-vanilla.sh
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: gapps-to-vanilla-${{ steps.latest_release.outputs.release_tag }}
+        path: gapps-to-vanilla.zip
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.latest_release.outputs.release_tag }}
+        name: "gapps-to-vanilla - ${{ steps.latest_release.outputs.release_tag }}"
+        body: |
+          ## gapps-to-vanilla
+          
+          **Convert GAPPS to Vanilla AOSP**
+          
+          Built from: ${{ steps.latest_release.outputs.download_url }}
+          
+          ### What it does:
+          - ❌ Removes all Google apps and services (GAPPS)
+          - ✅ Restores original AOSP components
+          - 🧹 Cleans cache and temporary files
+          
+          ### Installation:
+          1. Download `gapps-to-vanilla.zip`
+          2. Boot to recovery (TWRP/OrangeFox)
+          3. Install the ZIP file
+          4. Reboot system
+          
+          ### Components restored:
+          - AOSP apps (DeskClock, Calculator, Contacts, LatinIME, webview)
+          - System services (Provision, ThemePicker, Updater, PackageInstaller)
+          - Config files and permissions
+          - NOTICE.xml.gz and aconfig files
+          
+          📅 Built: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+        files: |
+          gapps-to-vanilla.zip
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
