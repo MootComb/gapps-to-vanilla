@@ -127,12 +127,10 @@ jobs:
           VANILLA_OUT="${{ env.WORK_DIR }}/extracted/vanilla"
           mkdir -p "$VANILLA_OUT"
           
-          cd ${{ env.WORK_DIR }}/downloads
+          xz -d "${{ env.WORK_DIR }}/downloads/vanilla.img.xz"
           
-          xz -d vanilla.img.xz
-          
-          if [[ -f "vanilla.img" ]]; then
-            7z x vanilla.img -o"$VANILLA_OUT" > /dev/null
+          if [[ -f "${{ env.WORK_DIR }}/downloads/vanilla.img" ]]; then
+            7z x "${{ env.WORK_DIR }}/downloads/vanilla.img" -o"$VANILLA_OUT" > /dev/null
             echo "VANILLA_EXTRACTED=$VANILLA_OUT" >> $GITHUB_ENV
             echo "VANILLA extracted successfully"
             ls -la "$VANILLA_OUT"
@@ -146,12 +144,10 @@ jobs:
           GAPPS_OUT="${{ env.WORK_DIR }}/extracted/gapps"
           mkdir -p "$GAPPS_OUT"
           
-          cd ${{ env.WORK_DIR }}/downloads
+          xz -d "${{ env.WORK_DIR }}/downloads/gapps.img.xz"
           
-          xz -d gapps.img.xz
-          
-          if [[ -f "gapps.img" ]]; then
-            7z x gapps.img -o"$GAPPS_OUT" > /dev/null
+          if [[ -f "${{ env.WORK_DIR }}/downloads/gapps.img" ]]; then
+            7z x "${{ env.WORK_DIR }}/downloads/gapps.img" -o"$GAPPS_OUT" > /dev/null
             echo "GAPPS_EXTRACTED=$GAPPS_OUT" >> $GITHUB_ENV
             echo "GAPPS extracted successfully"
             ls -la "$GAPPS_OUT"
@@ -181,11 +177,8 @@ jobs:
     steps:
       - name: Generate file tree with ls -laR
         run: |
-          cd "${{ env.VANILLA_EXTRACTED }}"
-          ls -laR > "${{ env.WORK_DIR }}/vanilla_tree.txt"
-          
-          cd "${{ env.GAPPS_EXTRACTED }}"
-          ls -laR > "${{ env.WORK_DIR }}/gapps_tree.txt"
+          ls -laR "${{ env.VANILLA_EXTRACTED }}" > "${{ env.WORK_DIR }}/vanilla_tree.txt"
+          ls -laR "${{ env.GAPPS_EXTRACTED }}" > "${{ env.WORK_DIR }}/gapps_tree.txt"
           
       - name: Extract only file paths from tree
         run: |
