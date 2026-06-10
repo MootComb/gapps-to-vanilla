@@ -69,16 +69,28 @@ jobs:
           mkdir -p "$VANILLA_OUT"
     
           xz -d "${{ env.WORK_DIR }}/downloads/vanilla.img.xz"
-          7z x "${{ env.WORK_DIR }}/downloads/vanilla.img" -o"$VANILLA_OUT" || true
+          set +e
+          7z x "${{ env.WORK_DIR }}/downloads/vanilla.img" -o"$VANILLA_OUT"
+          EXIT_CODE=$?
+          set -e
+          if [ $EXIT_CODE -ne 0 ] && [ $EXIT_CODE -ne 2 ]; then
+            exit $EXIT_CODE
+          fi
           echo "VANILLA_EXTRACTED=$VANILLA_OUT" >> $GITHUB_ENV
-    
+
       - name: Extract GAPPS
         run: |
           GAPPS_OUT="${{ env.WORK_DIR }}/extracted/gapps"
           mkdir -p "$GAPPS_OUT"
     
           xz -d "${{ env.WORK_DIR }}/downloads/gapps.img.xz"
-          7z x "${{ env.WORK_DIR }}/downloads/gapps.img" -o"$GAPPS_OUT" || true
+          set +e
+          7z x "${{ env.WORK_DIR }}/downloads/gapps.img" -o"$GAPPS_OUT"
+          EXIT_CODE=$?
+          set -e
+          if [ $EXIT_CODE -ne 0 ] && [ $EXIT_CODE -ne 2 ]; then
+            exit $EXIT_CODE
+          fi
           echo "GAPPS_EXTRACTED=$GAPPS_OUT" >> $GITHUB_ENV
           
       - name: Extract file paths
