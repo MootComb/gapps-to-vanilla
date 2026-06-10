@@ -35,7 +35,6 @@ jobs:
           RELEASE_URL="https://api.github.com/repos/Doze-off/ProjectInfinity-X_gsi/releases/tags/${{ github.event.inputs.release_tag }}"
         fi
         
-        echo "Fetching: $RELEASE_URL"
         RELEASE_DATA=$(curl -s "$RELEASE_URL")
         
         VANILLA_URL=$(echo "$RELEASE_DATA" | grep -o 'https://[^"]*VANILLA[^"]*\.xz' | head -1)
@@ -43,8 +42,6 @@ jobs:
         
         if [ -z "$VANILLA_URL" ] || [ -z "$GAPPS_URL" ]; then
           echo "ERROR: Images not found!"
-          echo "VANILLA: $VANILLA_URL"
-          echo "GAPPS: $GAPPS_URL"
           exit 1
         fi
         
@@ -58,23 +55,27 @@ jobs:
         
         RELEASE_TAG=$(echo "$RELEASE_DATA" | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4)
         echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
-        
-        echo "✅ VANILLA: $VANILLA_NAME"
-        echo "✅ GAPPS: $GAPPS_NAME"
-        echo "📌 Release: $RELEASE_TAG"
     
-    - name: Download images
+    - name: Download images in parallel
       run: |
         mkdir -p work_dir
         cd work_dir
         
-        echo "Downloading VANILLA..."
-        wget -q --show-progress "${{ env.VANILLA_URL }}" -O "${{ env.VANILLA_NAME }}"
+        wget -q --show-progress "${{ env.VANILLA_URL }}" -O "${{ env.VANILLA_NAME }}" &
+        PID_VANILLA=$!
         
-        echo "Downloading GAPPS..."
-        wget -q --show-progress "${{ env.GAPPS_URL }}" -O "${{ env.GAPPS_NAME }}"
+        wget -q --show-progress "${{ env.GAPPS_URL }}" -O "${{ env.GAPPS_NAME }}" &
+        PID_GAPPS=$!
         
-        ls -lh
+        wait $PID_VANILLA
+        VANILLA_EXIT=$?
+        
+        wait $PID_GAPPS
+        GAPPS_EXIT=$?
+        
+        if [ $VANILLA_EXIT -ne 0 ] || [ $GAPPS_EXIT -ne 0 ]; then
+          exit 1
+        fi
     
     - name: Extract VANILLA
       run: |
@@ -84,18 +85,14 @@ jobs:
         VANILLA_IMG="${VANILLA_NAME%.xz}"
         
         if file "$VANILLA_IMG" | grep -q "Android sparse image"; then
-          echo "Converting sparse to raw..."
           simg2img "$VANILLA_IMG" vanilla_raw.img
           VANILLA_RAW="vanilla_raw.img"
         else
           VANILLA_RAW="$VANILLA_IMG"
         fi
         
-        echo "Extracting VANILLA with 7z..."
         mkdir -p vanilla_extracted
         7z x "$VANILLA_RAW" -ovanilla_extracted -y > /dev/null 2>&1
-        
-        echo "VANILLA extracted: $(find vanilla_extracted -type f | wc -l) files"
     
     - name: Extract GAPPS
       run: |
@@ -105,18 +102,14 @@ jobs:
         GAPPS_IMG="${GAPPS_NAME%.xz}"
         
         if file "$GAPPS_IMG" | grep -q "Android sparse image"; then
-          echo "Converting sparse to raw..."
           simg2img "$GAPPS_IMG" gapps_raw.img
           GAPPS_RAW="gapps_raw.img"
         else
           GAPPS_RAW="$GAPPS_IMG"
         fi
         
-        echo "Extracting GAPPS with 7z..."
         mkdir -p gapps_extracted
         7z x "$GAPPS_RAW" -ogapps_extracted -y > /dev/null 2>&1
-        
-        echo "GAPPS extracted: $(find gapps_extracted -type f | wc -l) files"
     
     - name: Compare files
       run: |
