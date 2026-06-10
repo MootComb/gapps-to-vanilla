@@ -1,111 +1,158 @@
-name: gapps-to-vanilla
+name: Extract and Process GSI
 
 on:
-  schedule:
-    - cron: '0 0 * * *'
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: 'Release tag (e.g., 2026-06-07) - leave empty for latest'
-        required: false
-        default: ''
+  push:
+    paths:
+      - '.github/workflows/extract-gsi.yml'
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  extract:
+    runs-on: ubuntu-24.04
     
     steps:
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y xz-utils wget p7zip-full jq
-        
-        git clone https://github.com/anestisb/android-simg2img.git
-        cd android-simg2img
-        make
-        sudo cp simg2img img2simg /usr/local/bin/
-        cd ..
-    
-    - name: Get release assets
-      id: get_assets
-      run: |
-        if [ -z "${{ github.event.inputs.release_tag }}" ]; then
-          RELEASE_URL="https://api.github.com/repos/Doze-off/ProjectInfinity-X_gsi/releases/latest"
-        else
-          RELEASE_URL="https://api.github.com/repos/Doze-off/ProjectInfinity-X_gsi/releases/tags/${{ github.event.inputs.release_tag }}"
-        fi
-        
-        RELEASE_DATA=$(curl -s "$RELEASE_URL")
-        
-        VANILLA_URL=$(echo "$RELEASE_DATA" | grep -o 'https://[^"]*VANILLA[^"]*\.xz' | head -1)
-        GAPPS_URL=$(echo "$RELEASE_DATA" | grep -o 'https://[^"]*\.xz' | grep -v VANILLA | grep -v MICROG | head -1)
-        
-        if [ -z "$VANILLA_URL" ] || [ -z "$GAPPS_URL" ]; then
-          echo "ERROR: Images not found!"
-          exit 1
-        fi
-        
-        echo "VANILLA_URL=$VANILLA_URL" >> $GITHUB_ENV
-        echo "GAPPS_URL=$GAPPS_URL" >> $GITHUB_ENV
-        
-        VANILLA_NAME=$(basename "$VANILLA_URL")
-        GAPPS_NAME=$(basename "$GAPPS_URL")
-        echo "VANILLA_NAME=$VANILLA_NAME" >> $GITHUB_ENV
-        echo "GAPPS_NAME=$GAPPS_NAME" >> $GITHUB_ENV
-        
-        RELEASE_TAG=$(echo "$RELEASE_DATA" | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4)
-        echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
-    
-    - name: Download VANILLA
-      run: |
-        mkdir -p work_dir
-        cd work_dir
-        wget -q --show-progress "${{ env.VANILLA_URL }}" -O "${{ env.VANILLA_NAME }}"
-    
-    - name: Download GAPPS
-      run: |
-        cd work_dir
-        wget -q --show-progress "${{ env.GAPPS_URL }}" -O "${{ env.GAPPS_NAME }}"
-    
-    - name: Extract VANILLA
-      run: |
-        cd work_dir
-        xz -d "${{ env.VANILLA_NAME }}"
-        VANILLA_IMG="${VANILLA_NAME%.xz}"
-        
-        if file "$VANILLA_IMG" | grep -q "Android sparse image"; then
-          simg2img "$VANILLA_IMG" vanilla_raw.img
-          VANILLA_RAW="vanilla_raw.img"
-        else
-          VANILLA_RAW="$VANILLA_IMG"
-        fi
-        
-        mkdir -p vanilla_extracted
-        7z x "$VANILLA_RAW" -ovanilla_extracted -y > /dev/null 2>&1
-    
-    - name: Extract GAPPS
-      run: |
-        cd work_dir
-        xz -d "${{ env.GAPPS_NAME }}"
-        GAPPS_IMG="${GAPPS_NAME%.xz}"
-        
-        if file "$GAPPS_IMG" | grep -q "Android sparse image"; then
-          simg2img "$GAPPS_IMG" gapps_raw.img
-          GAPPS_RAW="gapps_raw.img"
-        else
-          GAPPS_RAW="$GAPPS_IMG"
-        fi
-        
-        mkdir -p gapps_extracted
-        7z x "$GAPPS_RAW" -ogapps_extracted -y > /dev/null 2>&1
-    
-    - name: Compare files
-      run: |
-        cd work_dir
-        diff -qr vanilla_extracted/ gapps_extracted/ | tee ../diff_output.txt || true
-    
-    - name: Upload diff
-      uses: actions/upload-artifact@v4
-      with:
-        name: gapps-vs-vanilla-diff
-        path: diff_output.txt
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          echo "=== Installing dependencies ==="
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xz-utils p7zip-full android-sdk-libsparse-utils file
+          echo "=== Tool versions ==="
+          7z --help | head -1
+          simg2img --help 2>&1 | head -1 || echo "simg2img installed"
+          file --version | head -1
+          xz --version | head -1
+
+      - name: Download vanilla image
+        run: |
+          echo "=== Downloading vanilla image ==="
+          mkdir -p work_dir && cd work_dir
+          echo "URL: $VANILLA_URL"
+          echo "Filename: $VANILLA_NAME"
+          
+          wget -nv -O "$VANILLA_NAME" "$VANILLA_URL" || {
+            echo "ERROR: Download failed!"
+            exit 1
+          }
+          
+          echo "=== Downloaded file info ==="
+          ls -lah "$VANILLA_NAME"
+          file "$VANILLA_NAME"
+          echo "MD5: $(md5sum $VANILLA_NAME)"
+        env:
+          VANILLA_URL: ${{ github.event.inputs.VANILLA_URL || 'https://github.com/Doze-off/ProjectInfinity-X_gsi/releases/download/2026-06-07/Infinity-X-3.11_GSI_treble_arm64-ab-VANILLA-Official-20260607.img.xz' }}
+          VANILLA_NAME: Infinity-X-3.11_GSI_treble_arm64-ab-VANILLA-Official-20260607.img.xz
+
+      - name: Decompress xz
+        run: |
+          echo "=== Decompressing xz ==="
+          cd work_dir
+          echo "Current directory: $(pwd)"
+          echo "Files: $(ls -la)"
+          
+          if [ ! -f "$VANILLA_NAME" ]; then
+            echo "ERROR: File $VANILLA_NAME not found!"
+            exit 1
+          fi
+          
+          echo "Decompressing $VANILLA_NAME..."
+          xz -d -v "$VANILLA_NAME" || {
+            echo "ERROR: xz decompression failed!"
+            echo "File type: $(file $VANILLA_NAME)"
+            exit 1
+          }
+          
+          echo "=== After decompression ==="
+          VANILLA_IMG="${VANILLA_NAME%.xz}"
+          echo "VANILLA_IMG: $VANILLA_IMG"
+          ls -lah "$VANILLA_IMG"
+          file "$VANILLA_IMG"
+          echo "VANILLA_IMG=$VANILLA_IMG" >> $GITHUB_ENV
+
+      - name: Convert sparse to raw if needed
+        run: |
+          echo "=== Checking image type ==="
+          cd work_dir
+          echo "VANILLA_IMG from env: $VANILLA_IMG"
+          
+          if [ ! -f "$VANILLA_IMG" ]; then
+            echo "ERROR: File $VANILLA_IMG not found!"
+            ls -la
+            exit 1
+          fi
+          
+          FILE_TYPE=$(file "$VANILLA_IMG")
+          echo "File type: $FILE_TYPE"
+          
+          if echo "$FILE_TYPE" | grep -q "Android sparse image"; then
+            echo "=== Converting sparse to raw ==="
+            simg2img "$VANILLA_IMG" vanilla_raw.img || {
+              echo "ERROR: simg2img failed!"
+              exit 1
+            }
+            VANILLA_RAW="vanilla_raw.img"
+            echo "Raw image created:"
+            ls -lah vanilla_raw.img
+            file vanilla_raw.img
+          else
+            echo "Image is already raw, no conversion needed"
+            VANILLA_RAW="$VANILLA_IMG"
+          fi
+          
+          echo "VANILLA_RAW=$VANILLA_RAW" >> $GITHUB_ENV
+
+      - name: Extract image contents
+        run: |
+          echo "=== Extracting image contents ==="
+          cd work_dir
+          echo "VANILLA_RAW: $VANILLA_RAW"
+          
+          if [ ! -f "$VANILLA_RAW" ]; then
+            echo "ERROR: File $VANILLA_RAW not found!"
+            ls -la
+            exit 1
+          fi
+          
+          echo "Image size: $(ls -lah $VANILLA_RAW)"
+          echo "File type: $(file $VANILLA_RAW)"
+          
+          mkdir -p vanilla_extracted
+          
+          echo "=== Checking 7z ==="
+          which 7z
+          7z --help | head -5
+          
+          echo "=== Starting extraction ==="
+          if 7z x "$VANILLA_RAW" -ovanilla_extracted -y; then
+            echo "SUCCESS: Extraction completed!"
+          else
+            EXIT_CODE=$?
+            echo "ERROR: 7z failed with code: $EXIT_CODE"
+            echo "=== Diagnostics ==="
+            echo "Checking if file is an archive:"
+            7z l "$VANILLA_RAW" 2>&1 || true
+            echo "Trying as tar:"
+            tar tf "$VANILLA_RAW" 2>&1 | head -20 || echo "Not a tar archive"
+            echo "File signature (first 100 bytes):"
+            xxd "$VANILLA_RAW" | head -10
+            exit $EXIT_CODE
+          fi
+          
+          echo "=== Contents of vanilla_extracted ==="
+          ls -la vanilla_extracted/
+          echo "Extracted size:"
+          du -sh vanilla_extracted/
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "=== FINAL REPORT ==="
+          cd work_dir 2>/dev/null || true
+          echo "Files in work_dir:"
+          ls -lah
+          if [ -d vanilla_extracted ]; then
+            echo "Extracted files:"
+            find vanilla_extracted -type f | head -30
+          fi
