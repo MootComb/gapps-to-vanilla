@@ -111,55 +111,61 @@ jobs:
     
     - name: Process extracted structure
       run: |
-        cd vanilla_extracted
-        
-        if [ -d "system" ] && [ -d "system/system" ]; then
-          mv system/system/* .
-          rm -rf system
-        fi
-        
-        cd ..
-        
-        mkdir -p vanilla
-        
-        cp -r vanilla_extracted/system_ext/priv-app vanilla/ 2>/dev/null || true
-        cp -r vanilla_extracted/product/app vanilla/product/ 2>/dev/null || true
-        cp -r vanilla_extracted/product/priv-app vanilla/product/ 2>/dev/null || true
-        cp -r vanilla_extracted/system/system/app vanilla/system/ 2>/dev/null || true
-        cp -r vanilla_extracted/system/system/priv-app vanilla/system/ 2>/dev/null || true
-        cp -r vanilla_extracted/system_ext/etc vanilla/system_ext/ 2>/dev/null || true
-        cp -r vanilla_extracted/product/etc vanilla/product/ 2>/dev/null || true
-        cp -r vanilla_extracted/product/lib64 vanilla/product/ 2>/dev/null || true
-        
+        mkdir -p vanilla/system_ext/priv-app
+        mkdir -p vanilla/product/app
+        mkdir -p vanilla/product/priv-app
+        mkdir -p vanilla/system/priv-app
+        mkdir -p vanilla/system/app
         mkdir -p vanilla/product/etc/default-permissions
         mkdir -p vanilla/product/etc/permissions
         mkdir -p vanilla/product/etc/sysconfig
+        mkdir -p vanilla/product/lib64
+        mkdir -p vanilla/system_ext/etc/permissions
         mkdir -p vanilla/system_ext/etc/aconfig
-        
-        cp vanilla_extracted/product/etc/default-permissions/*.xml vanilla/product/etc/default-permissions/ 2>/dev/null || true
-        cp vanilla_extracted/product/etc/permissions/*.xml vanilla/product/etc/permissions/ 2>/dev/null || true
-        cp vanilla_extracted/product/etc/sysconfig/*.xml vanilla/product/etc/sysconfig/ 2>/dev/null || true
-        cp vanilla_extracted/product/lib64/*.so vanilla/product/lib64/ 2>/dev/null || true
-        
-        cp vanilla_extracted/system_ext/etc/permissions/*.xml vanilla/system_ext/etc/permissions/ 2>/dev/null || true
-        
-        cp vanilla_extracted/product/etc/NOTICE.xml.gz vanilla/product/etc/ 2>/dev/null || true
-        cp vanilla_extracted/system/etc/NOTICE.xml.gz vanilla/system/etc/ 2>/dev/null || true
-        cp vanilla_extracted/system_ext/etc/NOTICE.xml.gz vanilla/system_ext/etc/ 2>/dev/null || true
-        
-        for file in flag.info flag.map flag.val package.map; do
-          cp vanilla_extracted/system_ext/etc/aconfig/$file vanilla/system_ext/etc/aconfig/ 2>/dev/null || true
-        done
-        cp vanilla_extracted/system_ext/etc/aconfig_flags.pb vanilla/system_ext/etc/ 2>/dev/null || true
-        
-        echo "Extracted components:"
-        find vanilla -type f 2>/dev/null | head -20 || echo "No files found"
-        
-        if [ ! -d "vanilla/priv-app" ] || [ -z "$(ls -A vanilla/priv-app 2>/dev/null)" ]; then
-          echo "Warning: No priv-app extracted, but continuing"
+        mkdir -p vanilla/system/etc
+    
+        # Copy system_ext/priv-app
+        if [ -d "vanilla_extracted/system_ext/priv-app" ]; then
+          cp -r vanilla_extracted/system_ext/priv-app/* vanilla/system_ext/priv-app/ 2>/dev/null || true
         fi
-        
-        echo "Vanilla components processed"
+    
+        # Copy product/app
+        if [ -d "vanilla_extracted/product/app" ]; then
+          cp -r vanilla_extracted/product/app/* vanilla/product/app/ 2>/dev/null || true
+        fi
+    
+        # Copy product/priv-app
+        if [ -d "vanilla_extracted/product/priv-app" ]; then
+          cp -r vanilla_extracted/product/priv-app/* vanilla/product/priv-app/ 2>/dev/null || true
+        fi
+    
+        # Copy system/priv-app
+        if [ -d "vanilla_extracted/system/priv-app" ]; then
+          cp -r vanilla_extracted/system/priv-app/* vanilla/system/priv-app/ 2>/dev/null || true
+        fi
+    
+        # Copy system/app
+        if [ -d "vanilla_extracted/system/app" ]; then
+          cp -r vanilla_extracted/system/app/* vanilla/system/app/ 2>/dev/null || true
+        fi
+    
+        # Copy config files
+        cp -r vanilla_extracted/product/etc/default-permissions/*.xml vanilla/product/etc/default-permissions/ 2>/dev/null || true
+        cp -r vanilla_extracted/product/etc/permissions/*.xml vanilla/product/etc/permissions/ 2>/dev/null || true
+        cp -r vanilla_extracted/product/etc/sysconfig/*.xml vanilla/product/etc/sysconfig/ 2>/dev/null || true
+        cp -r vanilla_extracted/product/lib64/*.so vanilla/product/lib64/ 2>/dev/null || true
+    
+        cp -r vanilla_extracted/system_ext/etc/permissions/*.xml vanilla/system_ext/etc/permissions/ 2>/dev/null || true
+    
+        cp -r vanilla_extracted/product/etc/NOTICE.xml.gz vanilla/product/etc/ 2>/dev/null || true
+        cp -r vanilla_extracted/system/etc/NOTICE.xml.gz vanilla/system/etc/ 2>/dev/null || true
+        cp -r vanilla_extracted/system_ext/etc/NOTICE.xml.gz vanilla/system_ext/etc/ 2>/dev/null || true
+    
+        cp -r vanilla_extracted/system_ext/etc/aconfig/flag.info vanilla/system_ext/etc/aconfig/ 2>/dev/null || true
+        cp -r vanilla_extracted/system_ext/etc/aconfig/flag.map vanilla/system_ext/etc/aconfig/ 2>/dev/null || true
+        cp -r vanilla_extracted/system_ext/etc/aconfig/flag.val vanilla/system_ext/etc/aconfig/ 2>/dev/null || true
+        cp -r vanilla_extracted/system_ext/etc/aconfig/package.map vanilla/system_ext/etc/aconfig/ 2>/dev/null || true
+        cp -r vanilla_extracted/system_ext/etc/aconfig_flags.pb vanilla/system_ext/etc/ 2>/dev/null || true
     
     - name: Run gapps-to-vanilla script
       run: |
