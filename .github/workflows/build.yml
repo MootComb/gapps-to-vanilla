@@ -70,7 +70,6 @@ jobs:
     - name: Extract VANILLA
       run: |
         cd work_dir
-        
         xz -d "${{ env.VANILLA_NAME }}"
         VANILLA_IMG="${VANILLA_NAME%.xz}"
         
@@ -87,7 +86,6 @@ jobs:
     - name: Extract GAPPS
       run: |
         cd work_dir
-        
         xz -d "${{ env.GAPPS_NAME }}"
         GAPPS_IMG="${GAPPS_NAME%.xz}"
         
