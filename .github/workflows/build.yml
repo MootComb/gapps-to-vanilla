@@ -13,120 +13,55 @@ permissions:
   contents: read
 
 jobs:
-  check_release:
-    name: Stage 1 - Check latest release
+  check_and_compare:
+    name: Check release and compare images
     runs-on: ubuntu-latest
-    outputs:
-      release_exists: ${{ steps.check.outputs.release_exists }}
-      vanilla_url: ${{ steps.check.outputs.vanilla_url }}
-      gapps_url: ${{ steps.check.outputs.gapps_url }}
-      release_tag: ${{ steps.check.outputs.release_tag }}
-      
+    
     steps:
-      - name: Fetch releases from GitHub API
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xz-utils p7zip-full jq curl
+        
+      - name: Fetch latest release
         id: fetch
         run: |
           mkdir -p ${{ env.WORK_DIR }}
           curl -fsSL "${{ env.SOURCE_API_URL }}" -o "${{ env.WORK_DIR }}/releases.json"
           
-          if [[ ! -s "${{ env.WORK_DIR }}/releases.json" ]]; then
-            echo "::error::Failed to fetch releases or empty response"
-            exit 1
-          fi
-          
-      - name: Find latest release with required assets
-        id: check
-        run: |
-          RELEASES_JSON="${{ env.WORK_DIR }}/releases.json"
-          
-          LATEST_RELEASE=$(jq -r '.[0]' "$RELEASES_JSON")
+          LATEST_RELEASE=$(jq -r '.[0]' "${{ env.WORK_DIR }}/releases.json")
           
           if [[ "$LATEST_RELEASE" == "null" ]]; then
             echo "::error::No releases found"
-            echo "release_exists=false" >> $GITHUB_OUTPUT
             exit 1
           fi
           
           RELEASE_TAG=$(echo "$LATEST_RELEASE" | jq -r '.tag_name')
           echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
           
-          VANILLA_ASSET=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | test("VANILLA")) | .browser_download_url' | head -1)
-          GAPPS_ASSET=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | test("GAPPS")) | .browser_download_url' | head -1)
+          VANILLA_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | test("VANILLA")) | .browser_download_url' | head -1)
+          GAPPS_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | test("GAPPS")) | .browser_download_url' | head -1)
           
-          if [[ -n "$VANILLA_ASSET" && -n "$GAPPS_ASSET" ]]; then
-            echo "release_exists=true" >> $GITHUB_OUTPUT
-            echo "vanilla_url=$VANILLA_ASSET" >> $GITHUB_OUTPUT
-            echo "gapps_url=$GAPPS_ASSET" >> $GITHUB_OUTPUT
-          else
-            echo "release_exists=false" >> $GITHUB_OUTPUT
+          if [[ -z "$VANILLA_URL" || -z "$GAPPS_URL" ]]; then
+            echo "::error::Required assets not found"
             exit 1
           fi
           
-      - name: Display release info
-        if: steps.check.outputs.release_exists == 'true'
-        run: |
-          echo "### Stage 1 completed successfully" >> $GITHUB_STEP_SUMMARY
-          echo "Release tag: ${{ steps.check.outputs.release_tag }}" >> $GITHUB_STEP_SUMMARY
-
-  download_assets:
-    name: Stage 2 - Download VANILLA and GAPPS
-    runs-on: ubuntu-latest
-    needs: check_release
-    if: needs.check_release.outputs.release_exists == 'true'
-    
-    steps:
-      - name: Prepare environment
-        run: |
-          mkdir -p ${{ env.WORK_DIR }}/downloads
+          echo "vanilla_url=$VANILLA_URL" >> $GITHUB_OUTPUT
+          echo "gapps_url=$GAPPS_URL" >> $GITHUB_OUTPUT
+          
+          echo "Found release: $RELEASE_TAG"
           
       - name: Download VANILLA
         run: |
+          mkdir -p ${{ env.WORK_DIR }}/downloads
           curl -fL --retry 5 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/vanilla.img.xz" \
-            "${{ needs.check_release.outputs.vanilla_url }}"
-          
-          if [[ -s "${{ env.WORK_DIR }}/downloads/vanilla.img.xz" ]]; then
-            echo "VANILLA downloaded successfully"
-          else
-            echo "::error::Failed to download VANILLA"
-            exit 1
-          fi
+            "${{ steps.fetch.outputs.vanilla_url }}"
           
       - name: Download GAPPS
         run: |
           curl -fL --retry 5 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/gapps.img.xz" \
-            "${{ needs.check_release.outputs.gapps_url }}"
-          
-          if [[ -s "${{ env.WORK_DIR }}/downloads/gapps.img.xz" ]]; then
-            echo "GAPPS downloaded successfully"
-          else
-            echo "::error::Failed to download GAPPS"
-            exit 1
-          fi
-          
-      - name: Upload downloads as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: gsi-downloads-${{ needs.check_release.outputs.release_tag }}
-          path: ${{ env.WORK_DIR }}/downloads/
-          retention-days: 1
-
-  extract_images:
-    name: Stage 3 - Extract images
-    runs-on: ubuntu-latest
-    needs: [check_release, download_assets]
-    if: needs.check_release.outputs.release_exists == 'true'
-    
-    steps:
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xz-utils p7zip-full
-          
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: gsi-downloads-${{ needs.check_release.outputs.release_tag }}
-          path: ${{ env.WORK_DIR }}/downloads/
+            "${{ steps.fetch.outputs.gapps_url }}"
           
       - name: Extract VANILLA
         run: |
@@ -134,15 +69,8 @@ jobs:
           mkdir -p "$VANILLA_OUT"
           
           xz -d "${{ env.WORK_DIR }}/downloads/vanilla.img.xz"
-          
-          if [[ -f "${{ env.WORK_DIR }}/downloads/vanilla.img" ]]; then
-            7z x "${{ env.WORK_DIR }}/downloads/vanilla.img" -o"$VANILLA_OUT" > /dev/null
-            echo "VANILLA_EXTRACTED=$VANILLA_OUT" >> $GITHUB_ENV
-            echo "VANILLA extracted successfully"
-          else
-            echo "::error::xz decompression failed for VANILLA"
-            exit 1
-          fi
+          7z x "${{ env.WORK_DIR }}/downloads/vanilla.img" -o"$VANILLA_OUT" > /dev/null
+          echo "VANILLA_EXTRACTED=$VANILLA_OUT" >> $GITHUB_ENV
           
       - name: Extract GAPPS
         run: |
@@ -150,42 +78,15 @@ jobs:
           mkdir -p "$GAPPS_OUT"
           
           xz -d "${{ env.WORK_DIR }}/downloads/gapps.img.xz"
-          
-          if [[ -f "${{ env.WORK_DIR }}/downloads/gapps.img" ]]; then
-            7z x "${{ env.WORK_DIR }}/downloads/gapps.img" -o"$GAPPS_OUT" > /dev/null
-            echo "GAPPS_EXTRACTED=$GAPPS_OUT" >> $GITHUB_ENV
-            echo "GAPPS extracted successfully"
-          else
-            echo "::error::xz decompression failed for GAPPS"
-            exit 1
-          fi
-          
-      - name: Upload extracted contents
-        uses: actions/upload-artifact@v4
-        with:
-          name: gsi-extracted-${{ needs.check_release.outputs.release_tag }}
-          path: ${{ env.WORK_DIR }}/extracted/
-          retention-days: 1
-
-  compare_images:
-    name: Stage 4 - Compare VANILLA vs GAPPS
-    runs-on: ubuntu-latest
-    needs: [check_release, extract_images]
-    if: needs.check_release.outputs.release_exists == 'true'
-    
-    steps:
-      - name: Download extracted artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: gsi-extracted-${{ needs.check_release.outputs.release_tag }}
-          path: ${{ env.WORK_DIR }}/extracted/
+          7z x "${{ env.WORK_DIR }}/downloads/gapps.img" -o"$GAPPS_OUT" > /dev/null
+          echo "GAPPS_EXTRACTED=$GAPPS_OUT" >> $GITHUB_ENV
           
       - name: Generate file tree
         run: |
-          ls -laR "${{ env.WORK_DIR }}/extracted/vanilla" > "${{ env.WORK_DIR }}/vanilla_tree.txt"
-          ls -laR "${{ env.WORK_DIR }}/extracted/gapps" > "${{ env.WORK_DIR }}/gapps_tree.txt"
+          ls -laR "${{ env.VANILLA_EXTRACTED }}" > "${{ env.WORK_DIR }}/vanilla_tree.txt"
+          ls -laR "${{ env.GAPPS_EXTRACTED }}" > "${{ env.WORK_DIR }}/gapps_tree.txt"
           
-      - name: Extract only file paths from tree
+      - name: Extract file paths
         run: |
           grep -E '^[-l]' "${{ env.WORK_DIR }}/vanilla_tree.txt" | \
             awk '{for(i=9;i<=NF;i++) printf "%s ", $i; print ""}' | \
@@ -195,7 +96,7 @@ jobs:
             awk '{for(i=9;i<=NF;i++) printf "%s ", $i; print ""}' | \
             sed 's/ ->.*//' | sed 's/ $//' | sort > "${{ env.WORK_DIR }}/gapps_files.txt"
           
-      - name: Extract directory structure
+      - name: Extract directories
         run: |
           grep -E '^d' "${{ env.WORK_DIR }}/vanilla_tree.txt" | \
             awk '{for(i=9;i<=NF;i++) printf "%s ", $i; print ""}' | \
@@ -205,19 +106,11 @@ jobs:
             awk '{for(i=9;i<=NF;i++) printf "%s ", $i; print ""}' | \
             sed 's/ $//' | sort > "${{ env.WORK_DIR }}/gapps_dirs.txt"
           
-      - name: Extract symlinks
-        run: |
-          grep -E '^l' "${{ env.WORK_DIR }}/vanilla_tree.txt" | \
-            sed -n 's/.*-> //p' | sort > "${{ env.WORK_DIR }}/vanilla_links.txt"
-          
-          grep -E '^l' "${{ env.WORK_DIR }}/gapps_tree.txt" | \
-            sed -n 's/.*-> //p' | sort > "${{ env.WORK_DIR }}/gapps_links.txt"
-          
-      - name: Generate diff report
+      - name: Generate comparison report
         run: |
           echo "# GSI Image Comparison: VANILLA vs GAPPS" > ${{ env.WORK_DIR }}/comparison_report.md
           echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "Release: ${{ needs.check_release.outputs.release_tag }}" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "Release: ${{ steps.fetch.outputs.release_tag }}" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "Comparison date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
           
@@ -227,15 +120,11 @@ jobs:
           echo "|------|---------|-------|" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "| Files | $(wc -l < ${{ env.WORK_DIR }}/vanilla_files.txt) | $(wc -l < ${{ env.WORK_DIR }}/gapps_files.txt) |" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "| Directories | $(wc -l < ${{ env.WORK_DIR }}/vanilla_dirs.txt) | $(wc -l < ${{ env.WORK_DIR }}/gapps_dirs.txt) |" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "| Symlinks | $(wc -l < ${{ env.WORK_DIR }}/vanilla_links.txt) | $(wc -l < ${{ env.WORK_DIR }}/gapps_links.txt) |" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
-          
-      - name: Find added files
-        run: |
-          TOTAL_ADDED=$(comm -13 ${{ env.WORK_DIR }}/vanilla_files.txt ${{ env.WORK_DIR }}/gapps_files.txt | wc -l)
           
           echo "## Files Added in GAPPS" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          TOTAL_ADDED=$(comm -13 ${{ env.WORK_DIR }}/vanilla_files.txt ${{ env.WORK_DIR }}/gapps_files.txt | wc -l)
           echo "**Total added files:** $TOTAL_ADDED" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
           
@@ -247,12 +136,9 @@ jobs:
           fi
           echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
           
-      - name: Find removed files
-        run: |
-          TOTAL_REMOVED=$(comm -23 ${{ env.WORK_DIR }}/vanilla_files.txt ${{ env.WORK_DIR }}/gapps_files.txt | wc -l)
-          
           echo "## Files Removed in GAPPS" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          TOTAL_REMOVED=$(comm -23 ${{ env.WORK_DIR }}/vanilla_files.txt ${{ env.WORK_DIR }}/gapps_files.txt | wc -l)
           echo "**Total removed files:** $TOTAL_REMOVED" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
           
@@ -264,8 +150,6 @@ jobs:
           fi
           echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
           
-      - name: Find directory differences
-        run: |
           echo "## Directory Differences" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
           
@@ -285,19 +169,13 @@ jobs:
       - name: Upload comparison report
         uses: actions/upload-artifact@v4
         with:
-          name: gsi-comparison-report-${{ needs.check_release.outputs.release_tag }}
+          name: gsi-comparison-report-${{ steps.fetch.outputs.release_tag }}
           path: ${{ env.WORK_DIR }}/comparison_report.md
           retention-days: 30
           
-      - name: Upload raw file lists
-        uses: actions/upload-artifact@v4
-        with:
-          name: gsi-raw-lists-${{ needs.check_release.outputs.release_tag }}
-          path: |
-            ${{ env.WORK_DIR }}/vanilla_tree.txt
-            ${{ env.WORK_DIR }}/gapps_tree.txt
-            ${{ env.WORK_DIR }}/vanilla_files.txt
-            ${{ env.WORK_DIR }}/gapps_files.txt
-            ${{ env.WORK_DIR }}/vanilla_dirs.txt
-            ${{ env.WORK_DIR }}/gapps_dirs.txt
-          retention-days: 7
+      - name: Display summary
+        run: |
+          echo "## Comparison Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Release: ${{ steps.fetch.outputs.release_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "Report uploaded as artifact" >> $GITHUB_STEP_SUMMARY
