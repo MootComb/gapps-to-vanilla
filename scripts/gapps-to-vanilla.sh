@@ -93,11 +93,11 @@ copy_item "vanilla/product/etc/sysconfig/com.android.deskclock_allowlist.xml" \
 echo ""
 
 echo "6. System apps:"
-copy_item "vanilla/system/system/app/ExtShared"  "$WORK_DIR/system/app/ExtShared"  "ExtShared"
-copy_item "vanilla/system/system/app/PrintRecommendationService" "$WORK_DIR/system/app/PrintRecommendationService" "PrintRecommendationService"
-copy_item "vanilla/system/system/app/ViaBrowser" "$WORK_DIR/system/app/ViaBrowser" "ViaBrowser"
-copy_item "vanilla/system/system/priv-app/PackageInstaller" "$WORK_DIR/system/priv-app/PackageInstaller" "PackageInstaller"
-copy_item "vanilla/system/system/priv-app/SoundPicker" "$WORK_DIR/system/priv-app/SoundPicker" "SoundPicker"
+copy_item "vanilla/system/app/ExtShared"  "$WORK_DIR/system/app/ExtShared"  "ExtShared"
+copy_item "vanilla/system/app/PrintRecommendationService" "$WORK_DIR/system/app/PrintRecommendationService" "PrintRecommendationService"
+copy_item "vanilla/system/app/ViaBrowser" "$WORK_DIR/system/app/ViaBrowser" "ViaBrowser"
+copy_item "vanilla/system/priv-app/PackageInstaller" "$WORK_DIR/system/priv-app/PackageInstaller" "PackageInstaller"
+copy_item "vanilla/system/priv-app/SoundPicker" "$WORK_DIR/system/priv-app/SoundPicker" "SoundPicker"
 echo ""
 
 echo "7. AOSP permissions:"
@@ -117,8 +117,8 @@ if [ -f "vanilla/product/etc/NOTICE.xml.gz" ]; then
     cp "vanilla/product/etc/NOTICE.xml.gz" "$WORK_DIR/product/etc/NOTICE.xml.gz"
     echo "  ✓ product/etc/NOTICE.xml.gz"
 fi
-if [ -f "vanilla/system/system/etc/NOTICE.xml.gz" ]; then
-    cp "vanilla/system/system/etc/NOTICE.xml.gz" "$WORK_DIR/system/etc/NOTICE.xml.gz"
+if [ -f "vanilla/system/etc/NOTICE.xml.gz" ]; then
+    cp "vanilla/system/etc/NOTICE.xml.gz" "$WORK_DIR/system/etc/NOTICE.xml.gz"
     echo "  ✓ system/etc/NOTICE.xml.gz"
 fi
 if [ -f "vanilla/system_ext/etc/NOTICE.xml.gz" ]; then
