@@ -6,205 +6,125 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Specific release tag (leave empty for latest VANILLA)'
+        description: 'Release tag (e.g., 2026-06-07) - leave empty for latest'
         required: false
         default: ''
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 1
-    
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y xz-utils wget unzip e2fsprogs p7zip-full
+        sudo apt-get install -y xz-utils wget p7zip-full jq
         
         git clone https://github.com/anestisb/android-simg2img.git
         cd android-simg2img
         make
         sudo cp simg2img img2simg /usr/local/bin/
         cd ..
-        
-        echo "=== Check installed tools ==="
-        ls -la /usr/local/bin/simg2img /usr/local/bin/img2simg
-        which simg2img img2simg
     
-    - name: Get latest VANILLA release
-      id: latest_release
+    - name: Get release assets
+      id: get_assets
       run: |
         if [ -z "${{ github.event.inputs.release_tag }}" ]; then
-          RELEASES_URL="https://api.github.com/repos/Doze-off/ProjectInfinity-X_gsi/releases"
-          ALL_RELEASES=$(curl -s $RELEASES_URL)
-          
-          DOWNLOAD_URL=$(echo "$ALL_RELEASES" | grep -o 'https://github.com/Doze-off/ProjectInfinity-X_gsi/releases/download/[^"]*VANILLA[^"]*\.xz' | head -1)
-          RELEASE_TAG=$(echo "$DOWNLOAD_URL" | grep -o 'download/[^/]*/' | cut -d'/' -f2)
+          RELEASE_URL="https://api.github.com/repos/Doze-off/ProjectInfinity-X_gsi/releases/latest"
         else
-          DOWNLOAD_URL="https://github.com/Doze-off/ProjectInfinity-X_gsi/releases/download/${{ github.event.inputs.release_tag }}/Infinity-X-*_GSI_treble_arm64-ab-VANILLA-Official-*.img.xz"
-          RELEASE_TAG="${{ github.event.inputs.release_tag }}"
+          RELEASE_URL="https://api.github.com/repos/Doze-off/ProjectInfinity-X_gsi/releases/tags/${{ github.event.inputs.release_tag }}"
         fi
         
-        if [ -z "$DOWNLOAD_URL" ]; then
-          echo "No VANILLA release found!"
+        echo "Fetching: $RELEASE_URL"
+        RELEASE_DATA=$(curl -s "$RELEASE_URL")
+        
+        VANILLA_URL=$(echo "$RELEASE_DATA" | grep -o 'https://[^"]*VANILLA[^"]*\.xz' | head -1)
+        GAPPS_URL=$(echo "$RELEASE_DATA" | grep -o 'https://[^"]*\.xz' | grep -v VANILLA | grep -v MICROG | head -1)
+        
+        if [ -z "$VANILLA_URL" ] || [ -z "$GAPPS_URL" ]; then
+          echo "ERROR: Images not found!"
+          echo "VANILLA: $VANILLA_URL"
+          echo "GAPPS: $GAPPS_URL"
           exit 1
         fi
         
-        echo "download_url=${DOWNLOAD_URL}" >> $GITHUB_OUTPUT
-        echo "release_tag=${RELEASE_TAG}" >> $GITHUB_OUTPUT
-        FILENAME=$(basename "$DOWNLOAD_URL")
-        echo "filename=${FILENAME}" >> $GITHUB_OUTPUT
+        echo "VANILLA_URL=$VANILLA_URL" >> $GITHUB_ENV
+        echo "GAPPS_URL=$GAPPS_URL" >> $GITHUB_ENV
         
-        echo "Found VANILLA release: ${RELEASE_TAG}"
-        echo "Download URL: ${DOWNLOAD_URL}"
-    
-    - name: Download Vanilla GSI
-      run: |
-        mkdir -p vanilla_image
-        cd vanilla_image
-        wget "${{ steps.latest_release.outputs.download_url }}" -O "${{ steps.latest_release.outputs.filename }}"
-        echo "XZ_FILE=${{ steps.latest_release.outputs.filename }}" >> $GITHUB_ENV
+        VANILLA_NAME=$(basename "$VANILLA_URL")
+        GAPPS_NAME=$(basename "$GAPPS_URL")
+        echo "VANILLA_NAME=$VANILLA_NAME" >> $GITHUB_ENV
+        echo "GAPPS_NAME=$GAPPS_NAME" >> $GITHUB_ENV
         
-        echo "=== Contents after download ==="
-        ls -la
-        pwd
-    
-    - name: Extract XZ to IMG
-      run: |
-        cd vanilla_image
-        xz -d -v "${{ env.XZ_FILE }}"
-        IMG_FILE="${XZ_FILE%.xz}"
-        echo "IMG_FILE=${IMG_FILE}" >> $GITHUB_ENV
+        RELEASE_TAG=$(echo "$RELEASE_DATA" | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4)
+        echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
         
-        echo "=== Contents after XZ extraction ==="
-        ls -la
-        echo "File type:"
-        file "$IMG_FILE" || true
+        echo "✅ VANILLA: $VANILLA_NAME"
+        echo "✅ GAPPS: $GAPPS_NAME"
+        echo "📌 Release: $RELEASE_TAG"
     
-    - name: Convert sparse to raw if needed
+    - name: Download images
       run: |
-        cd vanilla_image
-        if file "${{ env.IMG_FILE }}" | grep -q "Android sparse image"; then
-          echo "Detected sparse image, converting..."
-          simg2img "${{ env.IMG_FILE }}" raw.img
-          export RAW_IMG="raw.img"
-          echo "=== After sparse conversion ==="
-          ls -la
-          file raw.img
+        mkdir -p work_dir
+        cd work_dir
+        
+        echo "Downloading VANILLA..."
+        wget -q --show-progress "${{ env.VANILLA_URL }}" -O "${{ env.VANILLA_NAME }}"
+        
+        echo "Downloading GAPPS..."
+        wget -q --show-progress "${{ env.GAPPS_URL }}" -O "${{ env.GAPPS_NAME }}"
+        
+        ls -lh
+    
+    - name: Extract VANILLA
+      run: |
+        cd work_dir
+        
+        xz -d "${{ env.VANILLA_NAME }}"
+        VANILLA_IMG="${VANILLA_NAME%.xz}"
+        
+        if file "$VANILLA_IMG" | grep -q "Android sparse image"; then
+          echo "Converting sparse to raw..."
+          simg2img "$VANILLA_IMG" vanilla_raw.img
+          VANILLA_RAW="vanilla_raw.img"
         else
-          echo "Already raw image"
-          export RAW_IMG="${{ env.IMG_FILE }}"
-          echo "=== Raw image detected ==="
-          ls -la
-          file "$RAW_IMG"
+          VANILLA_RAW="$VANILLA_IMG"
         fi
-        echo "RAW_IMG=${RAW_IMG}" >> $GITHUB_ENV
-    
-    - name: Extract image with 7zip
-      run: |
+        
+        echo "Extracting VANILLA with 7z..."
         mkdir -p vanilla_extracted
-        cd vanilla_image
-        echo "=== Before 7zip extraction ==="
-        ls -la
-        echo "Extracting ${{ env.RAW_IMG }}..."
-        7z x "${{ env.RAW_IMG }}" -o../vanilla_extracted -y || true
+        7z x "$VANILLA_RAW" -ovanilla_extracted -y > /dev/null 2>&1
         
-        echo "=== After extraction (7zip output) ==="
-        ls -la ../vanilla_extracted/
-        
-        echo "=== Structure of extracted files ==="
-        find ../vanilla_extracted -type d -maxdepth 2 | head -20
-        
-        echo "=== Total files extracted ==="
-        find ../vanilla_extracted -type f | wc -l
+        echo "VANILLA extracted: $(find vanilla_extracted -type f | wc -l) files"
     
-    - name: Run gapps-to-vanilla script
+    - name: Extract GAPPS
       run: |
-        echo "=== Current directory contents ==="
-        ls -la
+        cd work_dir
         
-        echo "=== Scripts directory check ==="
-        if [ -d "scripts" ]; then
-          ls -la scripts/
+        xz -d "${{ env.GAPPS_NAME }}"
+        GAPPS_IMG="${GAPPS_NAME%.xz}"
+        
+        if file "$GAPPS_IMG" | grep -q "Android sparse image"; then
+          echo "Converting sparse to raw..."
+          simg2img "$GAPPS_IMG" gapps_raw.img
+          GAPPS_RAW="gapps_raw.img"
         else
-          echo "scripts directory not found"
+          GAPPS_RAW="$GAPPS_IMG"
         fi
         
-        if [ -f "scripts/gapps-to-vanilla.sh" ]; then
-          echo "=== Script found, executing ==="
-          chmod +x scripts/gapps-to-vanilla.sh
-          ./scripts/gapps-to-vanilla.sh
-          
-          echo "=== After script execution ==="
-          ls -la
-          if [ -f "gapps-to-vanilla.zip" ]; then
-            echo "ZIP file created successfully"
-            ls -lh gapps-to-vanilla.zip
-          else
-            echo "WARNING: gapps-to-vanilla.zip not created"
-          fi
-        else
-          echo "scripts/gapps-to-vanilla.sh not found, creating dummy zip"
-          mkdir -p temp
-          echo "# gapps-to-vanilla" > temp/README.md
-          echo "Build info: ${{ steps.latest_release.outputs.release_tag }}" >> temp/README.md
-          echo "Build time: $(date -u)" >> temp/README.md
-          cd temp
-          zip -r ../gapps-to-vanilla.zip .
-          cd ..
-          
-          echo "=== Dummy ZIP created ==="
-          ls -la gapps-to-vanilla.zip
-        fi
+        echo "Extracting GAPPS with 7z..."
+        mkdir -p gapps_extracted
+        7z x "$GAPPS_RAW" -ogapps_extracted -y > /dev/null 2>&1
+        
+        echo "GAPPS extracted: $(find gapps_extracted -type f | wc -l) files"
     
-    - name: Verify final artifact
+    - name: Compare files
       run: |
-        echo "=== Final verification ==="
-        ls -la
-        if [ -f "gapps-to-vanilla.zip" ]; then
-          echo "✓ ZIP file exists"
-          echo "Size: $(du -h gapps-to-vanilla.zip | cut -f1)"
-          echo "Contents:"
-          unzip -l gapps-to-vanilla.zip | head -20
-        else
-          echo "✗ ERROR: gapps-to-vanilla.zip not found!"
-          exit 1
-        fi
+        cd work_dir
+        diff -qr vanilla_extracted/ gapps_extracted/ | tee ../diff_output.txt || true
     
-    - name: Upload artifact
+    - name: Upload diff
       uses: actions/upload-artifact@v4
       with:
-        name: gapps-to-vanilla-${{ steps.latest_release.outputs.release_tag }}
-        path: gapps-to-vanilla.zip
-    
-    - name: Create Release
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: ${{ steps.latest_release.outputs.release_tag }}
-        name: gapps-to-vanilla - ${{ steps.latest_release.outputs.release_tag }}
-        body: |
-          ## gapps-to-vanilla
-          
-          Convert GAPPS to Vanilla AOSP
-          
-          Built from VANILLA image: ${{ steps.latest_release.outputs.download_url }}
-          
-          ### Installation:
-          1. Download `gapps-to-vanilla.zip`
-          2. Boot to recovery
-          3. Install the ZIP file
-          4. Reboot system
-          
-          Built: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-        files: |
-          gapps-to-vanilla.zip
-        draft: false
-        prerelease: false
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        name: gapps-vs-vanilla-diff
+        path: diff_output.txt
