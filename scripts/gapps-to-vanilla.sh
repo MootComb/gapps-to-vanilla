@@ -58,71 +58,73 @@ copy_item() {
 echo "Copying AOSP components from vanilla to package..."
 echo ""
 
+SOURCE_DIR="vanilla_extracted"
+
 echo "1. Apps in /system_ext/priv-app:"
-copy_item "vanilla/system_ext/priv-app/Provision"           "$WORK_DIR/system_ext/priv-app/Provision"           "Provision"
-copy_item "vanilla/system_ext/priv-app/StatementService"    "$WORK_DIR/system_ext/priv-app/StatementService"    "StatementService"
-copy_item "vanilla/system_ext/priv-app/ThemePicker"         "$WORK_DIR/system_ext/priv-app/ThemePicker"         "ThemePicker"
-copy_item "vanilla/system_ext/priv-app/Updater"             "$WORK_DIR/system_ext/priv-app/Updater"             "Updater"
+copy_item "$SOURCE_DIR/system_ext/priv-app/Provision"           "$WORK_DIR/system_ext/priv-app/Provision"           "Provision"
+copy_item "$SOURCE_DIR/system_ext/priv-app/StatementService"    "$WORK_DIR/system_ext/priv-app/StatementService"    "StatementService"
+copy_item "$SOURCE_DIR/system_ext/priv-app/ThemePicker"         "$WORK_DIR/system_ext/priv-app/ThemePicker"         "ThemePicker"
+copy_item "$SOURCE_DIR/system_ext/priv-app/Updater"             "$WORK_DIR/system_ext/priv-app/Updater"             "Updater"
 echo ""
 
 echo "2. Apps in /product/app:"
-copy_item "vanilla/product/app/DeskClock"        "$WORK_DIR/product/app/DeskClock"        "DeskClock"
-copy_item "vanilla/product/app/ExactCalculator"  "$WORK_DIR/product/app/ExactCalculator"  "ExactCalculator"
-copy_item "vanilla/product/app/LatinIME"         "$WORK_DIR/product/app/LatinIME"         "LatinIME"
-copy_item "vanilla/product/app/webview"          "$WORK_DIR/product/app/webview"          "webview"
+copy_item "$SOURCE_DIR/product/app/DeskClock"        "$WORK_DIR/product/app/DeskClock"        "DeskClock"
+copy_item "$SOURCE_DIR/product/app/ExactCalculator"  "$WORK_DIR/product/app/ExactCalculator"  "ExactCalculator"
+copy_item "$SOURCE_DIR/product/app/LatinIME"         "$WORK_DIR/product/app/LatinIME"         "LatinIME"
+copy_item "$SOURCE_DIR/product/app/webview"          "$WORK_DIR/product/app/webview"          "webview"
 echo ""
 
 echo "3. Apps in /product/priv-app:"
-copy_item "vanilla/product/priv-app/Contacts"    "$WORK_DIR/product/priv-app/Contacts"    "Contacts"
+copy_item "$SOURCE_DIR/product/priv-app/Contacts"    "$WORK_DIR/product/priv-app/Contacts"    "Contacts"
 echo ""
 
 echo "4. Libraries:"
-copy_item "vanilla/product/lib64/libjni_latinime.so" "$WORK_DIR/product/lib64/libjni_latinime.so" "libjni_latinime.so"
+copy_item "$SOURCE_DIR/product/lib64/libjni_latinime.so" "$WORK_DIR/product/lib64/libjni_latinime.so" "libjni_latinime.so"
 echo ""
 
 echo "5. AOSP config files:"
-copy_item "vanilla/product/etc/default-permissions/com.android.deskclock_default-permissions.xml" \
+copy_item "$SOURCE_DIR/product/etc/default-permissions/com.android.deskclock_default-permissions.xml" \
           "$WORK_DIR/product/etc/default-permissions/com.android.deskclock_default-permissions.xml" \
           "deskclock permissions"
-copy_item "vanilla/product/etc/permissions/com.android.contacts.xml" \
+copy_item "$SOURCE_DIR/product/etc/permissions/com.android.contacts.xml" \
           "$WORK_DIR/product/etc/permissions/com.android.contacts.xml" \
           "contacts permissions"
-copy_item "vanilla/product/etc/sysconfig/com.android.deskclock_allowlist.xml" \
+copy_item "$SOURCE_DIR/product/etc/sysconfig/com.android.deskclock_allowlist.xml" \
           "$WORK_DIR/product/etc/sysconfig/com.android.deskclock_allowlist.xml" \
           "deskclock allowlist"
 echo ""
 
 echo "6. System apps:"
-copy_item "vanilla/system/app/ExtShared"  "$WORK_DIR/system/app/ExtShared"  "ExtShared"
-copy_item "vanilla/system/app/PrintRecommendationService" "$WORK_DIR/system/app/PrintRecommendationService" "PrintRecommendationService"
-copy_item "vanilla/system/app/ViaBrowser" "$WORK_DIR/system/app/ViaBrowser" "ViaBrowser"
-copy_item "vanilla/system/priv-app/PackageInstaller" "$WORK_DIR/system/priv-app/PackageInstaller" "PackageInstaller"
-copy_item "vanilla/system/priv-app/SoundPicker" "$WORK_DIR/system/priv-app/SoundPicker" "SoundPicker"
+copy_item "$SOURCE_DIR/system/app/ExtShared"  "$WORK_DIR/system/app/ExtShared"  "ExtShared"
+copy_item "$SOURCE_DIR/system/app/PrintRecommendationService" "$WORK_DIR/system/app/PrintRecommendationService" "PrintRecommendationService"
+copy_item "$SOURCE_DIR/system/app/ViaBrowser" "$WORK_DIR/system/app/ViaBrowser" "ViaBrowser"
+copy_item "$SOURCE_DIR/system/priv-app/PackageInstaller" "$WORK_DIR/system/priv-app/PackageInstaller" "PackageInstaller"
+copy_item "$SOURCE_DIR/system/priv-app/SoundPicker" "$WORK_DIR/system/priv-app/SoundPicker" "SoundPicker"
 echo ""
 
 echo "7. AOSP permissions:"
-copy_item "vanilla/system_ext/etc/permissions/android.software.theme_picker.xml" \
+copy_item "$SOURCE_DIR/system_ext/etc/permissions/android.software.theme_picker.xml" \
           "$WORK_DIR/system_ext/etc/permissions/android.software.theme_picker.xml" \
           "theme_picker"
-copy_item "vanilla/system_ext/etc/permissions/com.android.provision.xml" \
+copy_item "$SOURCE_DIR/system_ext/etc/permissions/com.android.provision.xml" \
           "$WORK_DIR/system_ext/etc/permissions/com.android.provision.xml" \
           "provision"
-copy_item "vanilla/system_ext/etc/permissions/com.android.statementservice.xml" \
+copy_item "$SOURCE_DIR/system_ext/etc/permissions/com.android.statementservice.xml" \
           "$WORK_DIR/system_ext/etc/permissions/com.android.statementservice.xml" \
           "statementservice"
 echo ""
 
 echo "8. NOTICE.xml.gz files:"
-if [ -f "vanilla/product/etc/NOTICE.xml.gz" ]; then
-    cp "vanilla/product/etc/NOTICE.xml.gz" "$WORK_DIR/product/etc/NOTICE.xml.gz"
+if [ -f "$SOURCE_DIR/product/etc/NOTICE.xml.gz" ]; then
+    cp "$SOURCE_DIR/product/etc/NOTICE.xml.gz" "$WORK_DIR/product/etc/NOTICE.xml.gz"
     echo "  ✓ product/etc/NOTICE.xml.gz"
 fi
-if [ -f "vanilla/system/etc/NOTICE.xml.gz" ]; then
-    cp "vanilla/system/etc/NOTICE.xml.gz" "$WORK_DIR/system/etc/NOTICE.xml.gz"
+if [ -f "$SOURCE_DIR/system/etc/NOTICE.xml.gz" ]; then
+    cp "$SOURCE_DIR/system/etc/NOTICE.xml.gz" "$WORK_DIR/system/etc/NOTICE.xml.gz"
     echo "  ✓ system/etc/NOTICE.xml.gz"
 fi
-if [ -f "vanilla/system_ext/etc/NOTICE.xml.gz" ]; then
-    cp "vanilla/system_ext/etc/NOTICE.xml.gz" "$WORK_DIR/system_ext/etc/NOTICE.xml.gz"
+if [ -f "$SOURCE_DIR/system_ext/etc/NOTICE.xml.gz" ]; then
+    cp "$SOURCE_DIR/system_ext/etc/NOTICE.xml.gz" "$WORK_DIR/system_ext/etc/NOTICE.xml.gz"
     echo "  ✓ system_ext/etc/NOTICE.xml.gz"
 fi
 echo ""
@@ -130,13 +132,13 @@ echo ""
 echo "9. Aconfig files:"
 mkdir -p "$WORK_DIR/system_ext/etc/aconfig"
 for file in flag.info flag.map flag.val package.map; do
-    if [ -f "vanilla/system_ext/etc/aconfig/$file" ]; then
-        cp "vanilla/system_ext/etc/aconfig/$file" "$WORK_DIR/system_ext/etc/aconfig/$file"
+    if [ -f "$SOURCE_DIR/system_ext/etc/aconfig/$file" ]; then
+        cp "$SOURCE_DIR/system_ext/etc/aconfig/$file" "$WORK_DIR/system_ext/etc/aconfig/$file"
         echo "  ✓ system_ext/etc/aconfig/$file"
     fi
 done
-if [ -f "vanilla/system_ext/etc/aconfig_flags.pb" ]; then
-    cp "vanilla/system_ext/etc/aconfig_flags.pb" "$WORK_DIR/system_ext/etc/aconfig_flags.pb"
+if [ -f "$SOURCE_DIR/system_ext/etc/aconfig_flags.pb" ]; then
+    cp "$SOURCE_DIR/system_ext/etc/aconfig_flags.pb" "$WORK_DIR/system_ext/etc/aconfig_flags.pb"
     echo "  ✓ system_ext/etc/aconfig_flags.pb"
 fi
 echo ""
