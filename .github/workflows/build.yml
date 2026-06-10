@@ -78,14 +78,11 @@ jobs:
       - name: Prepare environment
         run: |
           mkdir -p ${{ env.WORK_DIR }}/downloads
-          mkdir -p ${{ env.WORK_DIR }}/extracted
           
       - name: Download VANILLA
         run: |
           curl -fL --retry 5 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/vanilla.img.xz" \
             "${{ needs.check_release.outputs.vanilla_url }}"
-          
-          ls -la "${{ env.WORK_DIR }}/downloads/vanilla.img.xz"
           
           if [[ -s "${{ env.WORK_DIR }}/downloads/vanilla.img.xz" ]]; then
             echo "VANILLA downloaded successfully"
@@ -99,8 +96,6 @@ jobs:
           curl -fL --retry 5 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/gapps.img.xz" \
             "${{ needs.check_release.outputs.gapps_url }}"
           
-          ls -la "${{ env.WORK_DIR }}/downloads/gapps.img.xz"
-          
           if [[ -s "${{ env.WORK_DIR }}/downloads/gapps.img.xz" ]]; then
             echo "GAPPS downloaded successfully"
           else
@@ -108,87 +103,87 @@ jobs:
             exit 1
           fi
           
-      - name: Verify downloads with ls -la
-        run: |
-          echo "## Downloads completed" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          ls -la ${{ env.WORK_DIR }}/downloads/ >> $GITHUB_STEP_SUMMARY
-          pwd >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+      - name: Upload downloads as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gsi-downloads-${{ needs.check_release.outputs.release_tag }}
+          path: ${{ env.WORK_DIR }}/downloads/
+          retention-days: 1
 
   extract_images:
     name: Stage 3 - Extract images
     runs-on: ubuntu-latest
-    needs: download_assets
+    needs: [check_release, download_assets]
     if: needs.check_release.outputs.release_exists == 'true'
-  
+    
     steps:
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y xz-utils p7zip-full
-        
-      - name: Extract VANILLA with xz and 7z
+          
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: gsi-downloads-${{ needs.check_release.outputs.release_tag }}
+          path: ${{ env.WORK_DIR }}/downloads/
+          
+      - name: Extract VANILLA
         run: |
           VANILLA_OUT="${{ env.WORK_DIR }}/extracted/vanilla"
           mkdir -p "$VANILLA_OUT"
-        
+          
           xz -d "${{ env.WORK_DIR }}/downloads/vanilla.img.xz"
-        
-          ls -la "${{ env.WORK_DIR }}/downloads/"
-        
+          
           if [[ -f "${{ env.WORK_DIR }}/downloads/vanilla.img" ]]; then
             7z x "${{ env.WORK_DIR }}/downloads/vanilla.img" -o"$VANILLA_OUT" > /dev/null
             echo "VANILLA_EXTRACTED=$VANILLA_OUT" >> $GITHUB_ENV
             echo "VANILLA extracted successfully"
-            ls -la "$VANILLA_OUT"
           else
             echo "::error::xz decompression failed for VANILLA"
             exit 1
           fi
-        
-      - name: Extract GAPPS with xz and 7z
+          
+      - name: Extract GAPPS
         run: |
           GAPPS_OUT="${{ env.WORK_DIR }}/extracted/gapps"
           mkdir -p "$GAPPS_OUT"
-        
+          
           xz -d "${{ env.WORK_DIR }}/downloads/gapps.img.xz"
-        
-          ls -la "${{ env.WORK_DIR }}/downloads/"
-        
+          
           if [[ -f "${{ env.WORK_DIR }}/downloads/gapps.img" ]]; then
             7z x "${{ env.WORK_DIR }}/downloads/gapps.img" -o"$GAPPS_OUT" > /dev/null
             echo "GAPPS_EXTRACTED=$GAPPS_OUT" >> $GITHUB_ENV
             echo "GAPPS extracted successfully"
-            ls -la "$GAPPS_OUT"
           else
             echo "::error::xz decompression failed for GAPPS"
             exit 1
           fi
-        
-      - name: List extracted contents with ls -la
-        run: |
-          echo "## VANILLA extracted contents" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          ls -la "$VANILLA_EXTRACTED" >> $GITHUB_STEP_SUMMARY 2>&1
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-        
-          echo "## GAPPS extracted contents" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          ls -la "$GAPPS_EXTRACTED" >> $GITHUB_STEP_SUMMARY 2>&1
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+      - name: Upload extracted contents
+        uses: actions/upload-artifact@v4
+        with:
+          name: gsi-extracted-${{ needs.check_release.outputs.release_tag }}
+          path: ${{ env.WORK_DIR }}/extracted/
+          retention-days: 1
 
   compare_images:
     name: Stage 4 - Compare VANILLA vs GAPPS
     runs-on: ubuntu-latest
-    needs: extract_images
+    needs: [check_release, extract_images]
     if: needs.check_release.outputs.release_exists == 'true'
     
     steps:
-      - name: Generate file tree with ls -laR
+      - name: Download extracted artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: gsi-extracted-${{ needs.check_release.outputs.release_tag }}
+          path: ${{ env.WORK_DIR }}/extracted/
+          
+      - name: Generate file tree
         run: |
-          ls -laR "${{ env.VANILLA_EXTRACTED }}" > "${{ env.WORK_DIR }}/vanilla_tree.txt"
-          ls -laR "${{ env.GAPPS_EXTRACTED }}" > "${{ env.WORK_DIR }}/gapps_tree.txt"
+          ls -laR "${{ env.WORK_DIR }}/extracted/vanilla" > "${{ env.WORK_DIR }}/vanilla_tree.txt"
+          ls -laR "${{ env.WORK_DIR }}/extracted/gapps" > "${{ env.WORK_DIR }}/gapps_tree.txt"
           
       - name: Extract only file paths from tree
         run: |
@@ -287,23 +282,15 @@ jobs:
             sed 's/^/- /' | head -100 >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "\`\`\`" >> ${{ env.WORK_DIR }}/comparison_report.md
           
-      - name: Display summary
-        run: |
-          echo "## Comparison Complete" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          head -50 ${{ env.WORK_DIR }}/comparison_report.md >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Full report available in artifacts" >> $GITHUB_STEP_SUMMARY
-          
       - name: Upload comparison report
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: gsi-comparison-report-${{ needs.check_release.outputs.release_tag }}
           path: ${{ env.WORK_DIR }}/comparison_report.md
           retention-days: 30
           
       - name: Upload raw file lists
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: gsi-raw-lists-${{ needs.check_release.outputs.release_tag }}
           path: |
