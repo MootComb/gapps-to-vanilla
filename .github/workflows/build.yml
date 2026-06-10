@@ -1,162 +1,382 @@
-name: Extract and Process GSI
+name: GSI Release Monitor
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - '.github/workflows/extract-gsi.yml'
+  schedule:
+    - cron: '0 */6 * * *'
 
 env:
-  VANILLA_URL: https://github.com/Doze-off/ProjectInfinity-X_gsi/releases/download/2026-06-07/Infinity-X-3.11_GSI_treble_arm64-ab-VANILLA-Official-20260607.img.xz
-  GAPPS_URL: https://github.com/Doze-off/ProjectInfinity-X_gsi/releases/download/2026-06-07/Infinity-X-3.11_GSI_treble_arm64-ab-GAPPS-Official-20260607.img.xz
-  VANILLA_NAME: Infinity-X-3.11_GSI_treble_arm64-ab-VANILLA-Official-20260607.img.xz
-  GAPPS_NAME: Infinity-X-3.11_GSI_treble_arm64-ab-GAPPS-Official-20260607.img.xz
+  SOURCE_API_URL: "https://api.github.com/repos/Doze-off/ProjectInfinity-X_gsi/releases"
+  WORK_DIR: ${{ github.workspace }}/gsi_work
+  VANILLA_URL: ""
+  GAPPS_URL: ""
+  VANILLA_ARCHIVE: ""
+  GAPPS_ARCHIVE: ""
+  VANILLA_EXTRACTED: ""
+  GAPPS_EXTRACTED: ""
+
+permissions:
+  contents: read
 
 jobs:
-  extract:
-    runs-on: ubuntu-24.04
+  check_release:
+    name: Stage 1 - Check latest release
+    runs-on: ubuntu-latest
+    outputs:
+      release_exists: ${{ steps.check.outputs.release_exists }}
+      vanilla_url: ${{ steps.check.outputs.vanilla_url }}
+      gapps_url: ${{ steps.check.outputs.gapps_url }}
+      release_tag: ${{ steps.check.outputs.release_tag }}
+      
+    steps:
+      - name: Fetch releases from GitHub API
+        id: fetch
+        run: |
+          mkdir -p ${{ env.WORK_DIR }}
+          curl -fsSL "${{ env.SOURCE_API_URL }}" -o "${{ env.WORK_DIR }}/releases.json"
+          
+          if [[ ! -s "${{ env.WORK_DIR }}/releases.json" ]]; then
+            echo "::error::Failed to fetch releases or empty response"
+            exit 1
+          fi
+          
+          echo "Releases fetched successfully"
+          
+      - name: Find latest release with required assets
+        id: check
+        run: |
+          RELEASES_JSON="${{ env.WORK_DIR }}/releases.json"
+          
+          LATEST_RELEASE=$(jq -r '.[0]' "$RELEASES_JSON")
+          
+          if [[ "$LATEST_RELEASE" == "null" ]]; then
+            echo "::error::No releases found"
+            echo "release_exists=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          RELEASE_TAG=$(echo "$LATEST_RELEASE" | jq -r '.tag_name')
+          echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          
+          VANILLA_ASSET=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | test("VANILLA")) | .browser_download_url' | head -1)
+          GAPPS_ASSET=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | test("GAPPS")) | .browser_download_url' | head -1)
+          
+          if [[ -n "$VANILLA_ASSET" && -n "$GAPPS_ASSET" ]]; then
+            echo "release_exists=true" >> $GITHUB_OUTPUT
+            echo "vanilla_url=$VANILLA_ASSET" >> $GITHUB_OUTPUT
+            echo "gapps_url=$GAPPS_ASSET" >> $GITHUB_OUTPUT
+            echo "Found VANILLA and GAPPS assets in release $RELEASE_TAG"
+          else
+            echo "release_exists=false" >> $GITHUB_OUTPUT
+            echo "VANILLA found: $VANILLA_ASSET, GAPPS found: $GAPPS_ASSET"
+            echo "::warning::Missing VANILLA or GAPPS assets in latest release"
+            exit 1
+          fi
+          
+      - name: Display release info
+        if: steps.check.outputs.release_exists == 'true'
+        run: |
+          echo "### Stage 1 completed successfully" >> $GITHUB_STEP_SUMMARY
+          echo "Release tag: ${{ steps.check.outputs.release_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "VANILLA URL: ${{ steps.check.outputs.vanilla_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "GAPPS URL: ${{ steps.check.outputs.gapps_url }}" >> $GITHUB_STEP_SUMMARY
+
+  download_assets:
+    name: Stage 2 - Download VANILLA and GAPPS
+    runs-on: ubuntu-latest
+    needs: check_release
+    if: needs.check_release.outputs.release_exists == 'true'
     
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Prepare environment
+        run: |
+          mkdir -p ${{ env.WORK_DIR }}/downloads
+          mkdir -p ${{ env.WORK_DIR }}/extracted
+          echo "VANILLA_URL=${{ needs.check_release.outputs.vanilla_url }}" >> $GITHUB_ENV
+          echo "GAPPS_URL=${{ needs.check_release.outputs.gapps_url }}" >> $GITHUB_ENV
+          
+      - name: Download VANILLA
+        id: download_vanilla
+        run: |
+          VANILLA_FILE="${{ env.WORK_DIR }}/downloads/vanilla.img.xz"
+          curl -fL --retry 5 --retry-delay 3 -o "$VANILLA_FILE" "${{ needs.check_release.outputs.vanilla_url }}"
+          
+          if [[ -s "$VANILLA_FILE" ]]; then
+            echo "VANILLA_ARCHIVE=$VANILLA_FILE" >> $GITHUB_ENV
+            echo "VANILLA downloaded: $(ls -lh $VANILLA_FILE | awk '{print $5}')"
+          else
+            echo "::error::Failed to download VANILLA"
+            exit 1
+          fi
+          
+      - name: Download GAPPS
+        id: download_gapps
+        run: |
+          GAPPS_FILE="${{ env.WORK_DIR }}/downloads/gapps.img.xz"
+          curl -fL --retry 5 --retry-delay 3 -o "$GAPPS_FILE" "${{ needs.check_release.outputs.gapps_url }}"
+          
+          if [[ -s "$GAPPS_FILE" ]]; then
+            echo "GAPPS_ARCHIVE=$GAPPS_FILE" >> $GITHUB_ENV
+            echo "GAPPS downloaded: $(ls -lh $GAPPS_FILE | awk '{print $5}')"
+          else
+            echo "::error::Failed to download GAPPS"
+            exit 1
+          fi
+          
+      - name: Verify downloads
+        run: |
+          echo "## Downloads completed" >> $GITHUB_STEP_SUMMARY
+          echo "- VANILLA: $(basename $VANILLA_ARCHIVE) ($(ls -lh $VANILLA_ARCHIVE | awk '{print $5}'))" >> $GITHUB_STEP_SUMMARY
+          echo "- GAPPS: $(basename $GAPPS_ARCHIVE) ($(ls -lh $GAPPS_ARCHIVE | awk '{print $5}'))" >> $GITHUB_STEP_SUMMARY
 
+  extract_images:
+    name: Stage 3 - Extract images
+    runs-on: ubuntu-latest
+    needs: download_assets
+    if: needs.check_release.outputs.release_exists == 'true'
+    
+    steps:
       - name: Install dependencies
         run: |
-          echo "=== Installing dependencies ==="
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq xz-utils p7zip-full android-sdk-libsparse-utils file
-          echo "=== Tool versions ==="
-          7z --help | head -1
-          simg2img --help 2>&1 | head -1 || echo "simg2img installed"
-          file --version | head -1
-          xz --version | head -1
-
-      - name: Download vanilla image
+          sudo apt-get update
+          sudo apt-get install -y xz-utils
+          
+      - name: Extract VANILLA
         run: |
-          echo "=== Downloading vanilla image ==="
-          mkdir -p work_dir && cd work_dir
-          echo "URL: ${VANILLA_URL}"
-          echo "Filename: ${VANILLA_NAME}"
+          VANILLA_OUT="${{ env.WORK_DIR }}/extracted/vanilla"
+          mkdir -p "$VANILLA_OUT"
           
-          wget -nv -O "${VANILLA_NAME}" "${VANILLA_URL}" || {
-            echo "ERROR: Download failed!"
-            exit 1
-          }
+          echo "Extracting VANILLA archive..."
+          unxz -k "${{ env.VANILLA_ARCHIVE }}" -c > "$VANILLA_OUT/system.img"
           
-          echo "=== Downloaded file info ==="
-          ls -lah "${VANILLA_NAME}"
-          file "${VANILLA_NAME}"
-          echo "MD5: $(md5sum ${VANILLA_NAME})"
-
-      - name: Decompress xz
-        run: |
-          echo "=== Decompressing xz ==="
-          cd work_dir
-          echo "Current directory: $(pwd)"
-          echo "Files: $(ls -la)"
-          
-          if [ ! -f "${VANILLA_NAME}" ]; then
-            echo "ERROR: File ${VANILLA_NAME} not found!"
-            ls -la
-            exit 1
-          fi
-          
-          echo "Decompressing ${VANILLA_NAME}..."
-          xz -d -v "${VANILLA_NAME}" || {
-            echo "ERROR: xz decompression failed!"
-            echo "File type: $(file ${VANILLA_NAME})"
-            exit 1
-          }
-          
-          echo "=== After decompression ==="
-          VANILLA_IMG="${VANILLA_NAME%.xz}"
-          echo "VANILLA_IMG: ${VANILLA_IMG}"
-          ls -lah "${VANILLA_IMG}"
-          file "${VANILLA_IMG}"
-          echo "VANILLA_IMG=${VANILLA_IMG}" >> $GITHUB_ENV
-
-      - name: Convert sparse to raw if needed
-        run: |
-          echo "=== Checking image type ==="
-          cd work_dir
-          echo "VANILLA_IMG from env: ${VANILLA_IMG}"
-          
-          if [ ! -f "${VANILLA_IMG}" ]; then
-            echo "ERROR: File ${VANILLA_IMG} not found!"
-            ls -la
-            exit 1
-          fi
-          
-          FILE_TYPE=$(file "${VANILLA_IMG}")
-          echo "File type: ${FILE_TYPE}"
-          
-          if echo "${FILE_TYPE}" | grep -q "Android sparse image"; then
-            echo "=== Converting sparse to raw ==="
-            simg2img "${VANILLA_IMG}" vanilla_raw.img || {
-              echo "ERROR: simg2img failed!"
-              exit 1
-            }
-            VANILLA_RAW="vanilla_raw.img"
-            echo "Raw image created:"
-            ls -lah vanilla_raw.img
-            file vanilla_raw.img
+          if [[ -s "$VANILLA_OUT/system.img" ]]; then
+            echo "VANILLA_EXTRACTED=$VANILLA_OUT" >> $GITHUB_ENV
+            echo "VANILLA extracted: $(ls -lh $VANILLA_OUT/system.img | awk '{print $5}')"
           else
-            echo "Image is already raw, no conversion needed"
-            VANILLA_RAW="${VANILLA_IMG}"
-          fi
-          
-          echo "VANILLA_RAW=${VANILLA_RAW}" >> $GITHUB_ENV
-
-      - name: Extract image contents
-        run: |
-          echo "=== Extracting image contents ==="
-          cd work_dir
-          echo "VANILLA_RAW: ${VANILLA_RAW}"
-          
-          if [ ! -f "${VANILLA_RAW}" ]; then
-            echo "ERROR: File ${VANILLA_RAW} not found!"
-            ls -la
+            echo "::error::Failed to extract VANILLA"
             exit 1
           fi
           
-          echo "Image size: $(ls -lah ${VANILLA_RAW})"
-          echo "File type: $(file ${VANILLA_RAW})"
-          
-          mkdir -p vanilla_extracted
-          
-          echo "=== Checking 7z ==="
-          which 7z
-          7z --help | head -5
-          
-          echo "=== Starting extraction ==="
-          if 7z x "${VANILLA_RAW}" -ovanilla_extracted -y; then
-            echo "SUCCESS: Extraction completed!"
-          else
-            EXIT_CODE=$?
-            echo "ERROR: 7z failed with code: ${EXIT_CODE}"
-            echo "=== Diagnostics ==="
-            echo "Checking if file is an archive:"
-            7z l "${VANILLA_RAW}" 2>&1 || true
-            echo "Trying as tar:"
-            tar tf "${VANILLA_RAW}" 2>&1 | head -20 || echo "Not a tar archive"
-            echo "File signature (first 100 bytes):"
-            xxd "${VANILLA_RAW}" | head -10
-            exit ${EXIT_CODE}
-          fi
-          
-          echo "=== Contents of vanilla_extracted ==="
-          ls -la vanilla_extracted/
-          echo "Extracted size:"
-          du -sh vanilla_extracted/
-
-      - name: Summary
-        if: always()
+      - name: Extract GAPPS
         run: |
-          echo "=== FINAL REPORT ==="
-          cd work_dir 2>/dev/null || true
-          echo "Files in work_dir:"
-          ls -lah
-          if [ -d vanilla_extracted ]; then
-            echo "Extracted files:"
-            find vanilla_extracted -type f | head -30
+          GAPPS_OUT="${{ env.WORK_DIR }}/extracted/gapps"
+          mkdir -p "$GAPPS_OUT"
+          
+          echo "Extracting GAPPS archive..."
+          unxz -k "${{ env.GAPPS_ARCHIVE }}" -c > "$GAPPS_OUT/system.img"
+          
+          if [[ -s "$GAPPS_OUT/system.img" ]]; then
+            echo "GAPPS_EXTRACTED=$GAPPS_OUT" >> $GITHUB_ENV
+            echo "GAPPS extracted: $(ls -lh $GAPPS_OUT/system.img | awk '{print $5}')"
+          else
+            echo "::error::Failed to extract GAPPS"
+            exit 1
           fi
+          
+      - name: Mount and list images
+        run: |
+          echo "## Extracted images info" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### VANILLA image" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          file ${{ env.VANILLA_EXTRACTED }}/system.img >> $GITHUB_STEP_SUMMARY 2>&1
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### GAPPS image" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          file ${{ env.GAPPS_EXTRACTED }}/system.img >> $GITHUB_STEP_SUMMARY 2>&1
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+      - name: List VANILLA contents
+        run: |
+          echo "## VANILLA system.img contents (ls -la)" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+          mkdir -p ${{ env.WORK_DIR }}/mount/vanilla
+          sudo mount -o loop,ro ${{ env.VANILLA_EXTRACTED }}/system.img ${{ env.WORK_DIR }}/mount/vanilla 2>/dev/null || \
+            echo "Mount failed (may require root or special options)" >> $GITHUB_STEP_SUMMARY
+          
+          if mountpoint -q ${{ env.WORK_DIR }}/mount/vanilla; then
+            ls -la ${{ env.WORK_DIR }}/mount/vanilla >> $GITHUB_STEP_SUMMARY 2>&1
+            sudo umount ${{ env.WORK_DIR }}/mount/vanilla
+          else
+            echo "Unable to mount image, using simg2img or alternative approach" >> $GITHUB_STEP_SUMMARY
+            echo "Image may be in sparse format" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+      - name: List GAPPS contents
+        run: |
+          echo "## GAPPS system.img contents (ls -la)" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+          mkdir -p ${{ env.WORK_DIR }}/mount/gapps
+          sudo mount -o loop,ro ${{ env.GAPPS_EXTRACTED }}/system.img ${{ env.WORK_DIR }}/mount/gapps 2>/dev/null || \
+            echo "Mount failed (may require root or special options)" >> $GITHUB_STEP_SUMMARY
+          
+          if mountpoint -q ${{ env.WORK_DIR }}/mount/gapps; then
+            ls -la ${{ env.WORK_DIR }}/mount/gapps >> $GITHUB_STEP_SUMMARY 2>&1
+            sudo umount ${{ env.WORK_DIR }}/mount/gapps
+          else
+            echo "Unable to mount image, using simg2img or alternative approach" >> $GITHUB_STEP_SUMMARY
+            echo "Image may be in sparse format" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+  compare_images:
+    name: Stage 4 - Compare VANILLA vs GAPPS
+    runs-on: ubuntu-latest
+    needs: extract_images
+    if: needs.check_release.outputs.release_exists == 'true'
+    
+    steps:
+      - name: Install comparison tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y e2fsprogs
+          
+      - name: Convert sparse images if needed
+        run: |
+          if command -v simg2img &> /dev/null; then
+            echo "simg2img available for sparse image conversion"
+          else
+            echo "::warning::simg2img not available, installing..."
+            sudo apt-get install -y android-sdk-libsparse-utils
+          fi
+          
+      - name: Extract file lists from VANILLA
+        run: |
+          VANILLA_MOUNT="${{ env.WORK_DIR }}/compare/vanilla"
+          mkdir -p "$VANILLA_MOUNT"
+          
+          if simg2img "${{ env.VANILLA_EXTRACTED }}/system.img" "${{ env.WORK_DIR }}/vanilla_raw.img" 2>/dev/null; then
+            sudo mount -o loop,ro "${{ env.WORK_DIR }}/vanilla_raw.img" "$VANILLA_MOUNT"
+          else
+            sudo mount -o loop,ro "${{ env.VANILLA_EXTRACTED }}/system.img" "$VANILLA_MOUNT" 2>/dev/null || \
+              echo "Mount failed, using debugfs"
+          fi
+          
+          if mountpoint -q "$VANILLA_MOUNT"; then
+            find "$VANILLA_MOUNT" -type f -printf "%P\n" 2>/dev/null | sort > "${{ env.WORK_DIR }}/vanilla_files.txt"
+            find "$VANILLA_MOUNT" -type l -printf "%P\n" 2>/dev/null | sort > "${{ env.WORK_DIR }}/vanilla_links.txt"
+            find "$VANILLA_MOUNT" -type d -printf "%P\n" 2>/dev/null | sort > "${{ env.WORK_DIR }}/vanilla_dirs.txt"
+            sudo umount "$VANILLA_MOUNT"
+          else
+            echo "::error::Failed to mount VANILLA image"
+            exit 1
+          fi
+          
+          echo "VANILLA: $(wc -l < ${{ env.WORK_DIR }}/vanilla_files.txt) files"
+          
+      - name: Extract file lists from GAPPS
+        run: |
+          GAPPS_MOUNT="${{ env.WORK_DIR }}/compare/gapps"
+          mkdir -p "$GAPPS_MOUNT"
+          
+          if simg2img "${{ env.GAPPS_EXTRACTED }}/system.img" "${{ env.WORK_DIR }}/gapps_raw.img" 2>/dev/null; then
+            sudo mount -o loop,ro "${{ env.WORK_DIR }}/gapps_raw.img" "$GAPPS_MOUNT"
+          else
+            sudo mount -o loop,ro "${{ env.GAPPS_EXTRACTED }}/system.img" "$GAPPS_MOUNT" 2>/dev/null || \
+              echo "Mount failed, using debugfs"
+          fi
+          
+          if mountpoint -q "$GAPPS_MOUNT"; then
+            find "$GAPPS_MOUNT" -type f -printf "%P\n" 2>/dev/null | sort > "${{ env.WORK_DIR }}/gapps_files.txt"
+            find "$GAPPS_MOUNT" -type l -printf "%P\n" 2>/dev/null | sort > "${{ env.WORK_DIR }}/gapps_links.txt"
+            find "$GAPPS_MOUNT" -type d -printf "%P\n" 2>/dev/null | sort > "${{ env.WORK_DIR }}/gapps_dirs.txt"
+            sudo umount "$GAPPS_MOUNT"
+          else
+            echo "::error::Failed to mount GAPPS image"
+            exit 1
+          fi
+          
+          echo "GAPPS: $(wc -l < ${{ env.WORK_DIR }}/gapps_files.txt) files"
+          
+      - name: Compare file differences
+        run: |
+          echo "# GSI Image Comparison: VANILLA vs GAPPS" > ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "Release: ${{ needs.check_release.outputs.release_tag }}" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          
+          echo "## Summary" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "| Type | VANILLA | GAPPS |" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "|------|---------|-------|" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "| Files | $(wc -l < ${{ env.WORK_DIR }}/vanilla_files.txt) | $(wc -l < ${{ env.WORK_DIR }}/gapps_files.txt) |" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "| Directories | $(wc -l < ${{ env.WORK_DIR }}/vanilla_dirs.txt) | $(wc -l < ${{ env.WORK_DIR }}/gapps_dirs.txt) |" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "| Symlinks | $(wc -l < ${{ env.WORK_DIR }}/vanilla_links.txt) | $(wc -l < ${{ env.WORK_DIR }}/gapps_links.txt) |" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          
+      - name: Find added files
+        run: |
+          echo "## Files present in GAPPS but not in VANILLA (added)" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "\`\`\`" >> ${{ env.WORK_DIR }}/comparison_report.md
+          comm -13 ${{ env.WORK_DIR }}/vanilla_files.txt ${{ env.WORK_DIR }}/gapps_files.txt | head -100 >> ${{ env.WORK_DIR }}/comparison_report.md
+          TOTAL_ADDED=$(comm -13 ${{ env.WORK_DIR }}/vanilla_files.txt ${{ env.WORK_DIR }}/gapps_files.txt | wc -l)
+          if [[ $TOTAL_ADDED -gt 100 ]]; then
+            echo "... and $((TOTAL_ADDED - 100)) more files" >> ${{ env.WORK_DIR }}/comparison_report.md
+          fi
+          echo "\`\`\`" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "**Total added files:** $TOTAL_ADDED" >> ${{ env.WORK_DIR }}/comparison_report.md
+          
+      - name: Find removed files
+        run: |
+          echo "## Files present in VANILLA but not in GAPPS (removed)" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "\`\`\`" >> ${{ env.WORK_DIR }}/comparison_report.md
+          comm -23 ${{ env.WORK_DIR }}/vanilla_files.txt ${{ env.WORK_DIR }}/gapps_files.txt | head -100 >> ${{ env.WORK_DIR }}/comparison_report.md
+          TOTAL_REMOVED=$(comm -23 ${{ env.WORK_DIR }}/vanilla_files.txt ${{ env.WORK_DIR }}/gapps_files.txt | wc -l)
+          if [[ $TOTAL_REMOVED -gt 100 ]]; then
+            echo "... and $((TOTAL_REMOVED - 100)) more files" >> ${{ env.WORK_DIR }}/comparison_report.md
+          fi
+          echo "\`\`\`" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "**Total removed files:** $TOTAL_REMOVED" >> ${{ env.WORK_DIR }}/comparison_report.md
+          
+      - name: Find modified files
+        run: |
+          echo "## Files present in both (common files)" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          COMMON_FILES=$(comm -12 ${{ env.WORK_DIR }}/vanilla_files.txt ${{ env.WORK_DIR }}/gapps_files.txt | wc -l)
+          echo "**Common files:** $COMMON_FILES" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          
+          echo "## Directory differences" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "### Directories in GAPPS only (added)" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "\`\`\`" >> ${{ env.WORK_DIR }}/comparison_report.md
+          comm -13 ${{ env.WORK_DIR }}/vanilla_dirs.txt ${{ env.WORK_DIR }}/gapps_dirs.txt | head -50 >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "\`\`\`" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          
+          echo "### Directories in VANILLA only (removed)" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "\`\`\`" >> ${{ env.WORK_DIR }}/comparison_report.md
+          comm -23 ${{ env.WORK_DIR }}/vanilla_dirs.txt ${{ env.WORK_DIR }}/gapps_dirs.txt | head -50 >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "\`\`\`" >> ${{ env.WORK_DIR }}/comparison_report.md
+          
+      - name: Display comparison report
+        run: |
+          cat ${{ env.WORK_DIR }}/comparison_report.md >> $GITHUB_STEP_SUMMARY
+          
+      - name: Upload comparison report
+        uses: actions/upload-artifact@v7
+        with:
+          name: gsi-comparison-report
+          path: ${{ env.WORK_DIR }}/comparison_report.md
+          retention-days: 30
+          
+      - name: Upload file lists
+        uses: actions/upload-artifact@v7
+        with:
+          name: gsi-file-lists
+          path: |
+            ${{ env.WORK_DIR }}/vanilla_files.txt
+            ${{ env.WORK_DIR }}/gapps_files.txt
+            ${{ env.WORK_DIR }}/vanilla_dirs.txt
+            ${{ env.WORK_DIR }}/gapps_dirs.txt
+          retention-days: 7
