@@ -90,82 +90,9 @@ jobs:
         mkdir vanilla_extracted
         cd vanilla_image
         7z x "${{ env.RAW_IMG }}" -o../vanilla_extracted -y || true
-        
-        echo "7zip extraction completed (symlink warnings are safe to ignore)"
+        echo "7zip extraction completed"
     
-    - name: Extract with fallback mount method if needed
-      if: ${{ failure() || steps.extract_7zip.outcome == 'failure' }}
-      run: |
-        if [ ! -d "vanilla_extracted/system" ] && [ ! -d "vanilla_extracted/system_ext" ]; then
-          echo "7zip extraction produced no output, trying mount method..."
-          
-          sudo mkdir -p /mnt/vanilla
-          sudo mount -o loop,ro vanilla_image/${{ env.RAW_IMG }} /mnt/vanilla
-          
-          mkdir -p vanilla_extracted
-          sudo cp -a /mnt/vanilla/* vanilla_extracted/
-          
-          sudo umount /mnt/vanilla
-          sudo chown -R $(id -u):$(id -g) vanilla_extracted/
-        fi
-    
-    - name: Process extracted structure
-      run: |
-        mkdir -p vanilla/system_ext/priv-app
-        mkdir -p vanilla/product/app
-        mkdir -p vanilla/product/priv-app
-        mkdir -p vanilla/system/priv-app
-        mkdir -p vanilla/system/app
-        mkdir -p vanilla/product/etc/default-permissions
-        mkdir -p vanilla/product/etc/permissions
-        mkdir -p vanilla/product/etc/sysconfig
-        mkdir -p vanilla/product/lib64
-        mkdir -p vanilla/system_ext/etc/permissions
-        mkdir -p vanilla/system_ext/etc/aconfig
-        mkdir -p vanilla/system/etc
-    
-        # Copy system_ext/priv-app
-        if [ -d "vanilla_extracted/system_ext/priv-app" ]; then
-          cp -r vanilla_extracted/system_ext/priv-app/* vanilla/system_ext/priv-app/ 2>/dev/null || true
-        fi
-    
-        # Copy product/app
-        if [ -d "vanilla_extracted/product/app" ]; then
-          cp -r vanilla_extracted/product/app/* vanilla/product/app/ 2>/dev/null || true
-        fi
-    
-        # Copy product/priv-app
-        if [ -d "vanilla_extracted/product/priv-app" ]; then
-          cp -r vanilla_extracted/product/priv-app/* vanilla/product/priv-app/ 2>/dev/null || true
-        fi
-    
-        # Copy system/priv-app
-        if [ -d "vanilla_extracted/system/priv-app" ]; then
-          cp -r vanilla_extracted/system/priv-app/* vanilla/system/priv-app/ 2>/dev/null || true
-        fi
-    
-        # Copy system/app
-        if [ -d "vanilla_extracted/system/app" ]; then
-          cp -r vanilla_extracted/system/app/* vanilla/system/app/ 2>/dev/null || true
-        fi
-    
-        # Copy config files
-        cp -r vanilla_extracted/product/etc/default-permissions/*.xml vanilla/product/etc/default-permissions/ 2>/dev/null || true
-        cp -r vanilla_extracted/product/etc/permissions/*.xml vanilla/product/etc/permissions/ 2>/dev/null || true
-        cp -r vanilla_extracted/product/etc/sysconfig/*.xml vanilla/product/etc/sysconfig/ 2>/dev/null || true
-        cp -r vanilla_extracted/product/lib64/*.so vanilla/product/lib64/ 2>/dev/null || true
-    
-        cp -r vanilla_extracted/system_ext/etc/permissions/*.xml vanilla/system_ext/etc/permissions/ 2>/dev/null || true
-    
-        cp -r vanilla_extracted/product/etc/NOTICE.xml.gz vanilla/product/etc/ 2>/dev/null || true
-        cp -r vanilla_extracted/system/etc/NOTICE.xml.gz vanilla/system/etc/ 2>/dev/null || true
-        cp -r vanilla_extracted/system_ext/etc/NOTICE.xml.gz vanilla/system_ext/etc/ 2>/dev/null || true
-    
-        cp -r vanilla_extracted/system_ext/etc/aconfig/flag.info vanilla/system_ext/etc/aconfig/ 2>/dev/null || true
-        cp -r vanilla_extracted/system_ext/etc/aconfig/flag.map vanilla/system_ext/etc/aconfig/ 2>/dev/null || true
-        cp -r vanilla_extracted/system_ext/etc/aconfig/flag.val vanilla/system_ext/etc/aconfig/ 2>/dev/null || true
-        cp -r vanilla_extracted/system_ext/etc/aconfig/package.map vanilla/system_ext/etc/aconfig/ 2>/dev/null || true
-        cp -r vanilla_extracted/system_ext/etc/aconfig_flags.pb vanilla/system_ext/etc/ 2>/dev/null || true
+    # Шаг "Process extracted structure" полностью УДАЛЁН
     
     - name: Run gapps-to-vanilla script
       run: |
@@ -199,13 +126,9 @@ jobs:
           
           Built from VANILLA image: ${{ steps.latest_release.outputs.download_url }}
           
-          ### What it does:
-          - Removes all Google apps and services (GAPPS)
-          - Restores original AOSP components
-          
           ### Installation:
           1. Download `gapps-to-vanilla.zip`
-          2. Boot to recovery (TWRP/OrangeFox)
+          2. Boot to recovery
           3. Install the ZIP file
           4. Reboot system
           
