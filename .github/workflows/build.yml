@@ -8,12 +8,6 @@ on:
 env:
   SOURCE_API_URL: "https://api.github.com/repos/Doze-off/ProjectInfinity-X_gsi/releases"
   WORK_DIR: ${{ github.workspace }}/gsi_work
-  VANILLA_URL: ""
-  GAPPS_URL: ""
-  VANILLA_ARCHIVE: ""
-  GAPPS_ARCHIVE: ""
-  VANILLA_EXTRACTED: ""
-  GAPPS_EXTRACTED: ""
 
 permissions:
   contents: read
@@ -88,11 +82,11 @@ jobs:
           
       - name: Download VANILLA
         run: |
-          VANILLA_FILE="${{ env.WORK_DIR }}/downloads/vanilla.img.xz"
-          curl -fL --retry 5 --retry-delay 3 -o "$VANILLA_FILE" "${{ needs.check_release.outputs.vanilla_url }}"
+          curl -fL --retry 5 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/vanilla.img.xz" \
+            "${{ needs.check_release.outputs.vanilla_url }}"
           
-          if [[ -s "$VANILLA_FILE" ]]; then
-            echo "VANILLA_ARCHIVE=$VANILLA_FILE" >> $GITHUB_ENV
+          if [[ -s "${{ env.WORK_DIR }}/downloads/vanilla.img.xz" ]]; then
+            echo "VANILLA downloaded successfully"
           else
             echo "::error::Failed to download VANILLA"
             exit 1
@@ -100,11 +94,11 @@ jobs:
           
       - name: Download GAPPS
         run: |
-          GAPPS_FILE="${{ env.WORK_DIR }}/downloads/gapps.img.xz"
-          curl -fL --retry 5 --retry-delay 3 -o "$GAPPS_FILE" "${{ needs.check_release.outputs.gapps_url }}"
+          curl -fL --retry 5 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/gapps.img.xz" \
+            "${{ needs.check_release.outputs.gapps_url }}"
           
-          if [[ -s "$GAPPS_FILE" ]]; then
-            echo "GAPPS_ARCHIVE=$GAPPS_FILE" >> $GITHUB_ENV
+          if [[ -s "${{ env.WORK_DIR }}/downloads/gapps.img.xz" ]]; then
+            echo "GAPPS downloaded successfully"
           else
             echo "::error::Failed to download GAPPS"
             exit 1
@@ -113,8 +107,8 @@ jobs:
       - name: Verify downloads
         run: |
           echo "## Downloads completed" >> $GITHUB_STEP_SUMMARY
-          echo "- VANILLA: $(ls -lh $VANILLA_ARCHIVE | awk '{print $5}')" >> $GITHUB_STEP_SUMMARY
-          echo "- GAPPS: $(ls -lh $GAPPS_ARCHIVE | awk '{print $5}')" >> $GITHUB_STEP_SUMMARY
+          echo "- VANILLA: $(ls -lh ${{ env.WORK_DIR }}/downloads/vanilla.img.xz | awk '{print $5}')" >> $GITHUB_STEP_SUMMARY
+          echo "- GAPPS: $(ls -lh ${{ env.WORK_DIR }}/downloads/gapps.img.xz | awk '{print $5}')" >> $GITHUB_STEP_SUMMARY
 
   extract_images:
     name: Stage 3 - Extract images
@@ -133,13 +127,15 @@ jobs:
           VANILLA_OUT="${{ env.WORK_DIR }}/extracted/vanilla"
           mkdir -p "$VANILLA_OUT"
           
-          xz -d "${{ env.VANILLA_ARCHIVE }}"
+          cd ${{ env.WORK_DIR }}/downloads
           
-          XZ_EXTRACTED="${VANILLA_ARCHIVE%.xz}"
+          xz -d vanilla.img.xz
           
-          if [[ -f "$XZ_EXTRACTED" ]]; then
-            7z x "$XZ_EXTRACTED" -o"$VANILLA_OUT" > /dev/null
+          if [[ -f "vanilla.img" ]]; then
+            7z x vanilla.img -o"$VANILLA_OUT" > /dev/null
             echo "VANILLA_EXTRACTED=$VANILLA_OUT" >> $GITHUB_ENV
+            echo "VANILLA extracted successfully"
+            ls -la "$VANILLA_OUT"
           else
             echo "::error::xz decompression failed for VANILLA"
             exit 1
@@ -150,13 +146,15 @@ jobs:
           GAPPS_OUT="${{ env.WORK_DIR }}/extracted/gapps"
           mkdir -p "$GAPPS_OUT"
           
-          xz -d "${{ env.GAPPS_ARCHIVE }}"
+          cd ${{ env.WORK_DIR }}/downloads
           
-          XZ_EXTRACTED="${GAPPS_ARCHIVE%.xz}"
+          xz -d gapps.img.xz
           
-          if [[ -f "$XZ_EXTRACTED" ]]; then
-            7z x "$XZ_EXTRACTED" -o"$GAPPS_OUT" > /dev/null
+          if [[ -f "gapps.img" ]]; then
+            7z x gapps.img -o"$GAPPS_OUT" > /dev/null
             echo "GAPPS_EXTRACTED=$GAPPS_OUT" >> $GITHUB_ENV
+            echo "GAPPS extracted successfully"
+            ls -la "$GAPPS_OUT"
           else
             echo "::error::xz decompression failed for GAPPS"
             exit 1
@@ -193,11 +191,11 @@ jobs:
         run: |
           grep -E '^[-l]' "${{ env.WORK_DIR }}/vanilla_tree.txt" | \
             awk '{for(i=9;i<=NF;i++) printf "%s ", $i; print ""}' | \
-            sed 's/ ->.*//' | sort > "${{ env.WORK_DIR }}/vanilla_files.txt"
+            sed 's/ ->.*//' | sed 's/ $//' | sort > "${{ env.WORK_DIR }}/vanilla_files.txt"
           
           grep -E '^[-l]' "${{ env.WORK_DIR }}/gapps_tree.txt" | \
             awk '{for(i=9;i<=NF;i++) printf "%s ", $i; print ""}' | \
-            sed 's/ ->.*//' | sort > "${{ env.WORK_DIR }}/gapps_files.txt"
+            sed 's/ ->.*//' | sed 's/ $//' | sort > "${{ env.WORK_DIR }}/gapps_files.txt"
           
       - name: Extract directory structure
         run: |
@@ -263,7 +261,7 @@ jobs:
           if [[ $TOTAL_REMOVED -gt 0 ]]; then
             echo "\`\`\`diff" >> ${{ env.WORK_DIR }}/comparison_report.md
             comm -23 ${{ env.WORK_DIR }}/vanilla_files.txt ${{ env.WORK_DIR }}/gapps_files.txt | \
-              sed 's/^/- /' | head -200 >> ${{ env.WORK_DIR }}/comparadison_report.md
+              sed 's/^/- /' | head -200 >> ${{ env.WORK_DIR }}/comparison_report.md
             echo "\`\`\`" >> ${{ env.WORK_DIR }}/comparison_report.md
           fi
           echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
