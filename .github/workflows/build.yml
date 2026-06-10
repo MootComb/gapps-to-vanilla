@@ -32,6 +32,10 @@ jobs:
         make
         sudo cp simg2img img2simg /usr/local/bin/
         cd ..
+        
+        echo "=== Check installed tools ==="
+        ls -la /usr/local/bin/simg2img /usr/local/bin/img2simg
+        which simg2img img2simg
     
     - name: Get latest VANILLA release
       id: latest_release
@@ -66,6 +70,10 @@ jobs:
         cd vanilla_image
         wget "${{ steps.latest_release.outputs.download_url }}" -O "${{ steps.latest_release.outputs.filename }}"
         echo "XZ_FILE=${{ steps.latest_release.outputs.filename }}" >> $GITHUB_ENV
+        
+        echo "=== Contents after download ==="
+        ls -la
+        pwd
     
     - name: Extract XZ to IMG
       run: |
@@ -73,39 +81,100 @@ jobs:
         xz -d -v "${{ env.XZ_FILE }}"
         IMG_FILE="${XZ_FILE%.xz}"
         echo "IMG_FILE=${IMG_FILE}" >> $GITHUB_ENV
+        
+        echo "=== Contents after XZ extraction ==="
+        ls -la
+        echo "File type:"
+        file "$IMG_FILE" || true
     
     - name: Convert sparse to raw if needed
       run: |
         cd vanilla_image
         if file "${{ env.IMG_FILE }}" | grep -q "Android sparse image"; then
+          echo "Detected sparse image, converting..."
           simg2img "${{ env.IMG_FILE }}" raw.img
           export RAW_IMG="raw.img"
+          echo "=== After sparse conversion ==="
+          ls -la
+          file raw.img
         else
+          echo "Already raw image"
           export RAW_IMG="${{ env.IMG_FILE }}"
+          echo "=== Raw image detected ==="
+          ls -la
+          file "$RAW_IMG"
         fi
         echo "RAW_IMG=${RAW_IMG}" >> $GITHUB_ENV
     
     - name: Extract image with 7zip
       run: |
-        mkdir vanilla_extracted
+        mkdir -p vanilla_extracted
         cd vanilla_image
+        echo "=== Before 7zip extraction ==="
+        ls -la
+        echo "Extracting ${{ env.RAW_IMG }}..."
         7z x "${{ env.RAW_IMG }}" -o../vanilla_extracted -y || true
-        echo "7zip extraction completed"
-    
-    # Шаг "Process extracted structure" полностью УДАЛЁН
+        
+        echo "=== After extraction (7zip output) ==="
+        ls -la ../vanilla_extracted/
+        
+        echo "=== Structure of extracted files ==="
+        find ../vanilla_extracted -type d -maxdepth 2 | head -20
+        
+        echo "=== Total files extracted ==="
+        find ../vanilla_extracted -type f | wc -l
     
     - name: Run gapps-to-vanilla script
       run: |
+        echo "=== Current directory contents ==="
+        ls -la
+        
+        echo "=== Scripts directory check ==="
+        if [ -d "scripts" ]; then
+          ls -la scripts/
+        else
+          echo "scripts directory not found"
+        fi
+        
         if [ -f "scripts/gapps-to-vanilla.sh" ]; then
+          echo "=== Script found, executing ==="
           chmod +x scripts/gapps-to-vanilla.sh
           ./scripts/gapps-to-vanilla.sh
+          
+          echo "=== After script execution ==="
+          ls -la
+          if [ -f "gapps-to-vanilla.zip" ]; then
+            echo "ZIP file created successfully"
+            ls -lh gapps-to-vanilla.zip
+          else
+            echo "WARNING: gapps-to-vanilla.zip not created"
+          fi
         else
           echo "scripts/gapps-to-vanilla.sh not found, creating dummy zip"
           mkdir -p temp
           echo "# gapps-to-vanilla" > temp/README.md
+          echo "Build info: ${{ steps.latest_release.outputs.release_tag }}" >> temp/README.md
+          echo "Build time: $(date -u)" >> temp/README.md
           cd temp
           zip -r ../gapps-to-vanilla.zip .
           cd ..
+          
+          echo "=== Dummy ZIP created ==="
+          ls -la gapps-to-vanilla.zip
+        fi
+    
+    - name: Verify final artifact
+      run: |
+        echo "=== Final verification ==="
+        ls -la
+        if [ -f "gapps-to-vanilla.zip" ]; then
+          echo "✓ ZIP file exists"
+          echo "Size: $(du -h gapps-to-vanilla.zip | cut -f1)"
+          echo "Contents:"
+          unzip -l gapps-to-vanilla.zip | head -20
+        else
+          echo "✗ ERROR: gapps-to-vanilla.zip not found!"
+          exit 1
         fi
     
     - name: Upload artifact
