@@ -113,6 +113,7 @@ jobs:
           echo "## Downloads completed" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           ls -la ${{ env.WORK_DIR }}/downloads/ >> $GITHUB_STEP_SUMMARY
+          pwd >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
   extract_images:
