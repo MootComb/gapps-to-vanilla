@@ -56,26 +56,16 @@ jobs:
         RELEASE_TAG=$(echo "$RELEASE_DATA" | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4)
         echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
     
-    - name: Download images in parallel
+    - name: Download VANILLA
       run: |
         mkdir -p work_dir
         cd work_dir
-        
-        wget -q --show-progress "${{ env.VANILLA_URL }}" -O "${{ env.VANILLA_NAME }}" &
-        PID_VANILLA=$!
-        
-        wget -q --show-progress "${{ env.GAPPS_URL }}" -O "${{ env.GAPPS_NAME }}" &
-        PID_GAPPS=$!
-        
-        wait $PID_VANILLA
-        VANILLA_EXIT=$?
-        
-        wait $PID_GAPPS
-        GAPPS_EXIT=$?
-        
-        if [ $VANILLA_EXIT -ne 0 ] || [ $GAPPS_EXIT -ne 0 ]; then
-          exit 1
-        fi
+        wget -q --show-progress "${{ env.VANILLA_URL }}" -O "${{ env.VANILLA_NAME }}"
+    
+    - name: Download GAPPS
+      run: |
+        cd work_dir
+        wget -q --show-progress "${{ env.GAPPS_URL }}" -O "${{ env.GAPPS_NAME }}"
     
     - name: Extract VANILLA
       run: |
