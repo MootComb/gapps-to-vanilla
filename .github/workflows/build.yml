@@ -85,6 +85,8 @@ jobs:
           curl -fL --retry 5 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/vanilla.img.xz" \
             "${{ needs.check_release.outputs.vanilla_url }}"
           
+          ls -la "${{ env.WORK_DIR }}/downloads/vanilla.img.xz"
+          
           if [[ -s "${{ env.WORK_DIR }}/downloads/vanilla.img.xz" ]]; then
             echo "VANILLA downloaded successfully"
           else
@@ -97,6 +99,8 @@ jobs:
           curl -fL --retry 5 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/gapps.img.xz" \
             "${{ needs.check_release.outputs.gapps_url }}"
           
+          ls -la "${{ env.WORK_DIR }}/downloads/gapps.img.xz"
+          
           if [[ -s "${{ env.WORK_DIR }}/downloads/gapps.img.xz" ]]; then
             echo "GAPPS downloaded successfully"
           else
@@ -104,11 +108,12 @@ jobs:
             exit 1
           fi
           
-      - name: Verify downloads
+      - name: Verify downloads with ls -la
         run: |
           echo "## Downloads completed" >> $GITHUB_STEP_SUMMARY
-          echo "- VANILLA: $(ls -lh ${{ env.WORK_DIR }}/downloads/vanilla.img.xz | awk '{print $5}')" >> $GITHUB_STEP_SUMMARY
-          echo "- GAPPS: $(ls -lh ${{ env.WORK_DIR }}/downloads/gapps.img.xz | awk '{print $5}')" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          ls -la ${{ env.WORK_DIR }}/downloads/ >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
   extract_images:
     name: Stage 3 - Extract images
@@ -129,6 +134,8 @@ jobs:
           
           xz -d "${{ env.WORK_DIR }}/downloads/vanilla.img.xz"
           
+          ls -la "${{ env.WORK_DIR }}/downloads/"
+          
           if [[ -f "${{ env.WORK_DIR }}/downloads/vanilla.img" ]]; then
             7z x "${{ env.WORK_DIR }}/downloads/vanilla.img" -o"$VANILLA_OUT" > /dev/null
             echo "VANILLA_EXTRACTED=$VANILLA_OUT" >> $GITHUB_ENV
@@ -146,6 +153,8 @@ jobs:
           
           xz -d "${{ env.WORK_DIR }}/downloads/gapps.img.xz"
           
+          ls -la "${{ env.WORK_DIR }}/downloads/"
+          
           if [[ -f "${{ env.WORK_DIR }}/downloads/gapps.img" ]]; then
             7z x "${{ env.WORK_DIR }}/downloads/gapps.img" -o"$GAPPS_OUT" > /dev/null
             echo "GAPPS_EXTRACTED=$GAPPS_OUT" >> $GITHUB_ENV
@@ -156,7 +165,7 @@ jobs:
             exit 1
           fi
           
-      - name: List extracted contents
+      - name: List extracted contents with ls -la
         run: |
           echo "## VANILLA extracted contents" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
