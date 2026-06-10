@@ -6,6 +6,12 @@ on:
     paths:
       - '.github/workflows/extract-gsi.yml'
 
+env:
+  VANILLA_URL: https://github.com/Doze-off/ProjectInfinity-X_gsi/releases/download/2026-06-07/Infinity-X-3.11_GSI_treble_arm64-ab-VANILLA-Official-20260607.img.xz
+  GAPPS_URL: https://github.com/Doze-off/ProjectInfinity-X_gsi/releases/download/2026-06-07/Infinity-X-3.11_GSI_treble_arm64-ab-GAPPS-Official-20260607.img.xz
+  VANILLA_NAME: Infinity-X-3.11_GSI_treble_arm64-ab-VANILLA-Official-20260607.img.xz
+  GAPPS_NAME: Infinity-X-3.11_GSI_treble_arm64-ab-GAPPS-Official-20260607.img.xz
+
 jobs:
   extract:
     runs-on: ubuntu-24.04
@@ -29,21 +35,18 @@ jobs:
         run: |
           echo "=== Downloading vanilla image ==="
           mkdir -p work_dir && cd work_dir
-          echo "URL: $VANILLA_URL"
-          echo "Filename: $VANILLA_NAME"
+          echo "URL: ${VANILLA_URL}"
+          echo "Filename: ${VANILLA_NAME}"
           
-          wget -nv -O "$VANILLA_NAME" "$VANILLA_URL" || {
+          wget -nv -O "${VANILLA_NAME}" "${VANILLA_URL}" || {
             echo "ERROR: Download failed!"
             exit 1
           }
           
           echo "=== Downloaded file info ==="
-          ls -lah "$VANILLA_NAME"
-          file "$VANILLA_NAME"
-          echo "MD5: $(md5sum $VANILLA_NAME)"
-        env:
-          VANILLA_URL: ${{ github.event.inputs.VANILLA_URL || 'https://github.com/Doze-off/ProjectInfinity-X_gsi/releases/download/2026-06-07/Infinity-X-3.11_GSI_treble_arm64-ab-VANILLA-Official-20260607.img.xz' }}
-          VANILLA_NAME: Infinity-X-3.11_GSI_treble_arm64-ab-VANILLA-Official-20260607.img.xz
+          ls -lah "${VANILLA_NAME}"
+          file "${VANILLA_NAME}"
+          echo "MD5: $(md5sum ${VANILLA_NAME})"
 
       - name: Decompress xz
         run: |
@@ -52,43 +55,44 @@ jobs:
           echo "Current directory: $(pwd)"
           echo "Files: $(ls -la)"
           
-          if [ ! -f "$VANILLA_NAME" ]; then
-            echo "ERROR: File $VANILLA_NAME not found!"
+          if [ ! -f "${VANILLA_NAME}" ]; then
+            echo "ERROR: File ${VANILLA_NAME} not found!"
+            ls -la
             exit 1
           fi
           
-          echo "Decompressing $VANILLA_NAME..."
-          xz -d -v "$VANILLA_NAME" || {
+          echo "Decompressing ${VANILLA_NAME}..."
+          xz -d -v "${VANILLA_NAME}" || {
             echo "ERROR: xz decompression failed!"
-            echo "File type: $(file $VANILLA_NAME)"
+            echo "File type: $(file ${VANILLA_NAME})"
             exit 1
           }
           
           echo "=== After decompression ==="
           VANILLA_IMG="${VANILLA_NAME%.xz}"
-          echo "VANILLA_IMG: $VANILLA_IMG"
-          ls -lah "$VANILLA_IMG"
-          file "$VANILLA_IMG"
-          echo "VANILLA_IMG=$VANILLA_IMG" >> $GITHUB_ENV
+          echo "VANILLA_IMG: ${VANILLA_IMG}"
+          ls -lah "${VANILLA_IMG}"
+          file "${VANILLA_IMG}"
+          echo "VANILLA_IMG=${VANILLA_IMG}" >> $GITHUB_ENV
 
       - name: Convert sparse to raw if needed
         run: |
           echo "=== Checking image type ==="
           cd work_dir
-          echo "VANILLA_IMG from env: $VANILLA_IMG"
+          echo "VANILLA_IMG from env: ${VANILLA_IMG}"
           
-          if [ ! -f "$VANILLA_IMG" ]; then
-            echo "ERROR: File $VANILLA_IMG not found!"
+          if [ ! -f "${VANILLA_IMG}" ]; then
+            echo "ERROR: File ${VANILLA_IMG} not found!"
             ls -la
             exit 1
           fi
           
-          FILE_TYPE=$(file "$VANILLA_IMG")
-          echo "File type: $FILE_TYPE"
+          FILE_TYPE=$(file "${VANILLA_IMG}")
+          echo "File type: ${FILE_TYPE}"
           
-          if echo "$FILE_TYPE" | grep -q "Android sparse image"; then
+          if echo "${FILE_TYPE}" | grep -q "Android sparse image"; then
             echo "=== Converting sparse to raw ==="
-            simg2img "$VANILLA_IMG" vanilla_raw.img || {
+            simg2img "${VANILLA_IMG}" vanilla_raw.img || {
               echo "ERROR: simg2img failed!"
               exit 1
             }
@@ -98,25 +102,25 @@ jobs:
             file vanilla_raw.img
           else
             echo "Image is already raw, no conversion needed"
-            VANILLA_RAW="$VANILLA_IMG"
+            VANILLA_RAW="${VANILLA_IMG}"
           fi
           
-          echo "VANILLA_RAW=$VANILLA_RAW" >> $GITHUB_ENV
+          echo "VANILLA_RAW=${VANILLA_RAW}" >> $GITHUB_ENV
 
       - name: Extract image contents
         run: |
           echo "=== Extracting image contents ==="
           cd work_dir
-          echo "VANILLA_RAW: $VANILLA_RAW"
+          echo "VANILLA_RAW: ${VANILLA_RAW}"
           
-          if [ ! -f "$VANILLA_RAW" ]; then
-            echo "ERROR: File $VANILLA_RAW not found!"
+          if [ ! -f "${VANILLA_RAW}" ]; then
+            echo "ERROR: File ${VANILLA_RAW} not found!"
             ls -la
             exit 1
           fi
           
-          echo "Image size: $(ls -lah $VANILLA_RAW)"
-          echo "File type: $(file $VANILLA_RAW)"
+          echo "Image size: $(ls -lah ${VANILLA_RAW})"
+          echo "File type: $(file ${VANILLA_RAW})"
           
           mkdir -p vanilla_extracted
           
@@ -125,19 +129,19 @@ jobs:
           7z --help | head -5
           
           echo "=== Starting extraction ==="
-          if 7z x "$VANILLA_RAW" -ovanilla_extracted -y; then
+          if 7z x "${VANILLA_RAW}" -ovanilla_extracted -y; then
             echo "SUCCESS: Extraction completed!"
           else
             EXIT_CODE=$?
-            echo "ERROR: 7z failed with code: $EXIT_CODE"
+            echo "ERROR: 7z failed with code: ${EXIT_CODE}"
             echo "=== Diagnostics ==="
             echo "Checking if file is an archive:"
-            7z l "$VANILLA_RAW" 2>&1 || true
+            7z l "${VANILLA_RAW}" 2>&1 || true
             echo "Trying as tar:"
-            tar tf "$VANILLA_RAW" 2>&1 | head -20 || echo "Not a tar archive"
+            tar tf "${VANILLA_RAW}" 2>&1 | head -20 || echo "Not a tar archive"
             echo "File signature (first 100 bytes):"
-            xxd "$VANILLA_RAW" | head -10
-            exit $EXIT_CODE
+            xxd "${VANILLA_RAW}" | head -10
+            exit ${EXIT_CODE}
           fi
           
           echo "=== Contents of vanilla_extracted ==="
