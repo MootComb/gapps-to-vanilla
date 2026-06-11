@@ -114,25 +114,31 @@ jobs:
 
       - name: Generate file lists
         run: |
-          # Create sorted file lists
-          find "$VANILLA_EXTRACTED" -type f | sort > ${{ env.WORK_DIR }}/vanilla_files.txt
-          find "$GAPPS_EXTRACTED" -type f | sort > ${{ env.WORK_DIR }}/gapps_files.txt
+          cd ${{ env.WORK_DIR }}/extracted
           
-          # Create sorted directory lists
-          find "$VANILLA_EXTRACTED" -type d | sort > ${{ env.WORK_DIR }}/vanilla_dirs.txt
-          find "$GAPPS_EXTRACTED" -type d | sort > ${{ env.WORK_DIR }}/gapps_dirs.txt
+          # Create sorted file lists with relative paths
+          find vanilla -type f | sort > ${{ env.WORK_DIR }}/vanilla_files.txt
+          find gapps -type f | sort > ${{ env.WORK_DIR }}/gapps_files.txt
           
-          echo "Generated file and directory lists"
+          # Create sorted directory lists with relative paths
+          find vanilla -type d | sort > ${{ env.WORK_DIR }}/vanilla_dirs.txt
+          find gapps -type d | sort > ${{ env.WORK_DIR }}/gapps_dirs.txt
+          
+          echo "Generated file and directory lists with relative paths"
 
       - name: Show structural differences
         run: |
+          cd ${{ env.WORK_DIR }}/extracted
+          
           echo "## Structural differences (diff -qr)" >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`diff" >> $GITHUB_STEP_SUMMARY
-          diff -qr "$VANILLA_EXTRACTED" "$GAPPS_EXTRACTED" >> $GITHUB_STEP_SUMMARY 2>&1 || true
+          diff -qr vanilla gapps >> $GITHUB_STEP_SUMMARY 2>&1 || true
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           
       - name: Generate comparison report
         run: |
+          cd ${{ env.WORK_DIR }}/extracted
+          
           echo "# GSI Image Comparison: VANILLA vs GAPPS" > ${{ env.WORK_DIR }}/comparison_report.md
           echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "Release: ${{ steps.fetch.outputs.release_tag }}" >> ${{ env.WORK_DIR }}/comparison_report.md
@@ -140,9 +146,9 @@ jobs:
           echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
           
           echo "## Paths" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "- Working directory: $(pwd)" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "- VANILLA: $VANILLA_EXTRACTED" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "- GAPPS: $GAPPS_EXTRACTED" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "- Working directory: \`${{ env.WORK_DIR }}/extracted\`" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "- VANILLA: \`vanilla/\`" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "- GAPPS: \`gapps/\`" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
           
           echo "## Summary Statistics" >> ${{ env.WORK_DIR }}/comparison_report.md
@@ -155,7 +161,7 @@ jobs:
           
           echo "## Structural differences (diff -qr)" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "\`\`\`diff" >> ${{ env.WORK_DIR }}/comparison_report.md
-          diff -qr "$VANILLA_EXTRACTED" "$GAPPS_EXTRACTED" >> ${{ env.WORK_DIR }}/comparison_report.md 2>&1 || true
+          diff -qr vanilla gapps >> ${{ env.WORK_DIR }}/comparison_report.md 2>&1 || true
           echo "\`\`\`" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
           
