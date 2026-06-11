@@ -92,26 +92,44 @@ jobs:
             exit $EXIT_CODE
           fi
           echo "GAPPS_EXTRACTED=$GAPPS_OUT" >> $GITHUB_ENV
-          
-      - name: Extract file paths
+
+      - name: Check locations and list files
         run: |
-          grep -E '^[-l]' "${{ env.WORK_DIR }}/vanilla_tree.txt" | \
-            awk '{for(i=9;i<=NF;i++) printf "%s ", $i; print ""}' | \
-            sed 's/ ->.*//' | sed 's/ $//' | sort > "${{ env.WORK_DIR }}/vanilla_files.txt"
+          echo "## Current working directory" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          pwd >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           
-          grep -E '^[-l]' "${{ env.WORK_DIR }}/gapps_tree.txt" | \
-            awk '{for(i=9;i<=NF;i++) printf "%s ", $i; print ""}' | \
-            sed 's/ ->.*//' | sed 's/ $//' | sort > "${{ env.WORK_DIR }}/gapps_files.txt"
+          echo "## VANILLA location" >> $GITHUB_STEP_SUMMARY
+          echo "Path: $VANILLA_EXTRACTED" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          ls -la "$VANILLA_EXTRACTED" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           
-      - name: Extract directories
+          echo "## GAPPS location" >> $GITHUB_STEP_SUMMARY
+          echo "Path: $GAPPS_EXTRACTED" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          ls -la "$GAPPS_EXTRACTED" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Generate file lists
         run: |
-          grep -E '^d' "${{ env.WORK_DIR }}/vanilla_tree.txt" | \
-            awk '{for(i=9;i<=NF;i++) printf "%s ", $i; print ""}' | \
-            sed 's/ $//' | sort > "${{ env.WORK_DIR }}/vanilla_dirs.txt"
+          # Create sorted file lists
+          find "$VANILLA_EXTRACTED" -type f | sort > ${{ env.WORK_DIR }}/vanilla_files.txt
+          find "$GAPPS_EXTRACTED" -type f | sort > ${{ env.WORK_DIR }}/gapps_files.txt
           
-          grep -E '^d' "${{ env.WORK_DIR }}/gapps_tree.txt" | \
-            awk '{for(i=9;i<=NF;i++) printf "%s ", $i; print ""}' | \
-            sed 's/ $//' | sort > "${{ env.WORK_DIR }}/gapps_dirs.txt"
+          # Create sorted directory lists
+          find "$VANILLA_EXTRACTED" -type d | sort > ${{ env.WORK_DIR }}/vanilla_dirs.txt
+          find "$GAPPS_EXTRACTED" -type d | sort > ${{ env.WORK_DIR }}/gapps_dirs.txt
+          
+          echo "Generated file and directory lists"
+
+      - name: Show structural differences
+        run: |
+          echo "## Structural differences (diff -qr)" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`diff" >> $GITHUB_STEP_SUMMARY
+          diff -qr "$VANILLA_EXTRACTED" "$GAPPS_EXTRACTED" >> $GITHUB_STEP_SUMMARY 2>&1 || true
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           
       - name: Generate comparison report
         run: |
@@ -121,12 +139,24 @@ jobs:
           echo "Comparison date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
           
+          echo "## Paths" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "- Working directory: $(pwd)" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "- VANILLA: $VANILLA_EXTRACTED" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "- GAPPS: $GAPPS_EXTRACTED" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          
           echo "## Summary Statistics" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "| Type | VANILLA | GAPPS |" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "|------|---------|-------|" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "| Files | $(wc -l < ${{ env.WORK_DIR }}/vanilla_files.txt) | $(wc -l < ${{ env.WORK_DIR }}/gapps_files.txt) |" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "| Directories | $(wc -l < ${{ env.WORK_DIR }}/vanilla_dirs.txt) | $(wc -l < ${{ env.WORK_DIR }}/gapps_dirs.txt) |" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          
+          echo "## Structural differences (diff -qr)" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "\`\`\`diff" >> ${{ env.WORK_DIR }}/comparison_report.md
+          diff -qr "$VANILLA_EXTRACTED" "$GAPPS_EXTRACTED" >> ${{ env.WORK_DIR }}/comparison_report.md 2>&1 || true
+          echo "\`\`\`" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
           
           echo "## Files Added in GAPPS" >> ${{ env.WORK_DIR }}/comparison_report.md
