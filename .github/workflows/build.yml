@@ -159,11 +159,7 @@ jobs:
           echo "| Directories | $(wc -l < ${{ env.WORK_DIR }}/vanilla_dirs.txt) | $(wc -l < ${{ env.WORK_DIR }}/gapps_dirs.txt) |" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
           
-          echo "## Structural differences (diff -qr)" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "\`\`\`diff" >> ${{ env.WORK_DIR }}/comparison_report.md
-          diff -qr vanilla gapps >> ${{ env.WORK_DIR }}/comparison_report.md 2>&1 || true
-          echo "\`\`\`" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          diff -qr vanilla gapps > ${{ env.WORK_DIR }}/full_diff.txt 2>&1 || true
           
           echo "## Files Added in GAPPS" >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
@@ -208,12 +204,26 @@ jobs:
           comm -23 ${{ env.WORK_DIR }}/vanilla_dirs.txt ${{ env.WORK_DIR }}/gapps_dirs.txt | \
             sed 's/^/- /' | head -100 >> ${{ env.WORK_DIR }}/comparison_report.md
           echo "\`\`\`" >> ${{ env.WORK_DIR }}/comparison_report.md
+
+      - name: Show filtered structural differences
+        run: |
+          cd ${{ env.WORK_DIR }}/extracted
           
-      - name: Upload comparison report
+          echo "## Filtered structural differences" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Filter:** Only \`system/\`, \`system_ext/\`, \`product/\` - excluding \`build.prop\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`diff" >> $GITHUB_STEP_SUMMARY
+          grep -E '(system/|system_ext/|product/)' ${{ env.WORK_DIR }}/full_diff.txt | grep -v 'build\.prop' >> $GITHUB_STEP_SUMMARY || echo "No differences found" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+          grep -E '(system/|system_ext/|product/)' ${{ env.WORK_DIR }}/full_diff.txt | grep -v 'build\.prop' > ${{ env.WORK_DIR }}/filtered_diff.txt || true
+          
+      - name: Upload filtered diff
         uses: actions/upload-artifact@v4
         with:
-          name: gsi-comparison-report-${{ steps.fetch.outputs.release_tag }}
-          path: ${{ env.WORK_DIR }}/comparison_report.md
+          name: filtered-diff-${{ steps.fetch.outputs.release_tag }}
+          path: ${{ env.WORK_DIR }}/filtered_diff.txt
           retention-days: 30
           
       - name: Display summary
