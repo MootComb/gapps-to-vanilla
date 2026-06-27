@@ -218,52 +218,102 @@ jobs:
           
           echo "Analyzing differences..."
           
-          comm -13 ${{ env.WORK_DIR }}/vanilla_files.txt ${{ env.WORK_DIR }}/gapps_files.txt | \
+          # Check if input files exist and have content
+          if [[ ! -s ${{ env.WORK_DIR }}/vanilla_files.txt ]]; then
+            echo "::error::vanilla_files.txt is empty or missing"
+            exit 1
+          fi
+          
+          if [[ ! -s ${{ env.WORK_DIR }}/gapps_files.txt ]]; then
+            echo "::error::gapps_files.txt is empty or missing"
+            exit 1
+          fi
+          
+          # Files only in GAPPS (need to delete)
+          set +e
+          comm -13 ${{ env.WORK_DIR }}/vanilla_files.txt ${{ env.WORK_DIR }}/gapps_files.txt 2>/dev/null | \
             grep -E '^(system/|system_ext/|product/)' | grep -v 'build\.prop' > ${{ env.WORK_DIR }}/gapps_only_files.txt
+          GAPPS_ONLY_COUNT=$(wc -l < ${{ env.WORK_DIR }}/gapps_only_files.txt)
+          echo "  GAPPS-only files: $GAPPS_ONLY_COUNT"
           
-          comm -23 ${{ env.WORK_DIR }}/vanilla_files.txt ${{ env.WORK_DIR }}/gapps_files.txt | \
+          # Files only in VANILLA (need to restore)
+          comm -23 ${{ env.WORK_DIR }}/vanilla_files.txt ${{ env.WORK_DIR }}/gapps_files.txt 2>/dev/null | \
             grep -E '^(system/|system_ext/|product/)' | grep -v 'build\.prop' > ${{ env.WORK_DIR }}/vanilla_only_files.txt
+          VANILLA_ONLY_COUNT=$(wc -l < ${{ env.WORK_DIR }}/vanilla_only_files.txt)
+          echo "  VANILLA-only files: $VANILLA_ONLY_COUNT"
           
-          grep "differ" ${{ env.WORK_DIR }}/full_diff.txt | \
+          # Files that differ between versions
+          grep "differ" ${{ env.WORK_DIR }}/full_diff.txt 2>/dev/null | \
             grep -E '(system/|system_ext/|product/)' | grep -v 'build\.prop' | \
             awk '{print $2}' | sed 's/^vanilla\///' > ${{ env.WORK_DIR }}/different_files.txt
+          DIFF_FILES_COUNT=$(wc -l < ${{ env.WORK_DIR }}/different_files.txt)
+          echo "  Different files: $DIFF_FILES_COUNT"
+          set -e
           
           echo "Copying vanilla files for restoration..."
           VANILLA_COUNT=0
-          while IFS= read -r file; do
-            if [[ -f "vanilla/$file" ]]; then
-              TARGET_DIR=$(dirname "$ZIP_DIR/$file")
-              mkdir -p "$TARGET_DIR"
-              cp "vanilla/$file" "$ZIP_DIR/$file"
-              VANILLA_COUNT=$((VANILLA_COUNT + 1))
-            fi
-          done < ${{ env.WORK_DIR }}/vanilla_only_files.txt
-          echo "  Vanilla-only files: $VANILLA_COUNT"
+          if [[ -s ${{ env.WORK_DIR }}/vanilla_only_files.txt ]]; then
+            while IFS= read -r file; do
+              if [[ -n "$file" && -f "vanilla/$file" ]]; then
+                TARGET_DIR=$(dirname "$ZIP_DIR/$file")
+                mkdir -p "$TARGET_DIR"
+                cp "vanilla/$file" "$ZIP_DIR/$file"
+                VANILLA_COUNT=$((VANILLA_COUNT + 1))
+              fi
+            done < ${{ env.WORK_DIR }}/vanilla_only_files.txt
+          fi
+          echo "  Vanilla-only files copied: $VANILLA_COUNT"
           
           DIFF_COUNT=0
-          while IFS= read -r file; do
-            if [[ -f "vanilla/$file" ]]; then
-              TARGET_DIR=$(dirname "$ZIP_DIR/$file")
-              mkdir -p "$TARGET_DIR"
-              cp "vanilla/$file" "$ZIP_DIR/$file"
-              DIFF_COUNT=$((DIFF_COUNT + 1))
-            fi
-          done < ${{ env.WORK_DIR }}/different_files.txt
-          echo "  Modified files: $DIFF_COUNT"
+          if [[ -s ${{ env.WORK_DIR }}/different_files.txt ]]; then
+            while IFS= read -r file; do
+              if [[ -n "$file" && -f "vanilla/$file" ]]; then
+                TARGET_DIR=$(dirname "$ZIP_DIR/$file")
+                mkdir -p "$TARGET_DIR"
+                cp "vanilla/$file" "$ZIP_DIR/$file"
+                DIFF_COUNT=$((DIFF_COUNT + 1))
+              fi
+            done < ${{ env.WORK_DIR }}/different_files.txt
+          fi
+          echo "  Modified files copied: $DIFF_COUNT"
           
           echo "Creating delete list..."
-          while IFS= read -r file; do
-            RELATIVE_PATH=$(echo "$file" | sed 's/^gapps\///')
-            echo "/$RELATIVE_PATH" >> "$ZIP_DIR/delete.list"
-          done < ${{ env.WORK_DIR }}/gapps_only_files.txt
-          DELETE_COUNT=$(wc -l < "$ZIP_DIR/delete.list")
+          if [[ -s ${{ env.WORK_DIR }}/gapps_only_files.txt ]]; then
+            while IFS= read -r file; do
+              if [[ -n "$file" ]]; then
+                RELATIVE_PATH=$(echo "$file" | sed 's/^gapps\///')
+                echo "/$RELATIVE_PATH" >> "$ZIP_DIR/delete.list"
+              fi
+            done < ${{ env.WORK_DIR }}/gapps_only_files.txt
+          fi
+          
+          if [[ -f "$ZIP_DIR/delete.list" ]]; then
+            DELETE_COUNT=$(wc -l < "$ZIP_DIR/delete.list")
+          else
+            DELETE_COUNT=0
+            touch "$ZIP_DIR/delete.list"
+          fi
           echo "  Files to delete: $DELETE_COUNT"
           
           echo "Creating recovery ZIP structure..."
           mkdir -p "$ZIP_DIR/META-INF/com/google/android"
-          cp "${{ github.workspace }}/scripts/update-binary" "$ZIP_DIR/META-INF/com/google/android/update-binary"
-          cp "${{ github.workspace }}/scripts/updater-script" "$ZIP_DIR/META-INF/com/google/android/updater-script"
-          chmod +x "$ZIP_DIR/META-INF/com/google/android/update-binary"
+          
+          if [[ -f "${{ github.workspace }}/scripts/update-binary" ]]; then
+            cp "${{ github.workspace }}/scripts/update-binary" "$ZIP_DIR/META-INF/com/google/android/update-binary"
+            chmod +x "$ZIP_DIR/META-INF/com/google/android/update-binary"
+            echo "  update-binary copied"
+          else
+            echo "::error::scripts/update-binary not found"
+            exit 1
+          fi
+          
+          if [[ -f "${{ github.workspace }}/scripts/updater-script" ]]; then
+            cp "${{ github.workspace }}/scripts/updater-script" "$ZIP_DIR/META-INF/com/google/android/updater-script"
+            echo "  updater-script copied"
+          else
+            echo "::error::scripts/updater-script not found"
+            exit 1
+          fi
           
           RELEASE_TAG="${{ steps.fetch.outputs.release_tag }}"
           ZIP_NAME="gapps-to-vanilla-${RELEASE_TAG}.zip"
