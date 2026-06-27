@@ -8,11 +8,16 @@ on:
         required: false
         type: string
         default: ''
+      source_api_url:
+        description: 'GitHub API URL for releases (leave empty for default)'
+        required: false
+        type: string
+        default: ''
   schedule:
     - cron: '0 */6 * * *'
 
 env:
-  SOURCE_API_URL: "https://api.github.com/repos/Doze-off/ProjectInfinity-X_gsi/releases"
+  DEFAULT_API_URL: "https://api.github.com/repos/Doze-off/ProjectInfinity-X_gsi/releases"
   WORK_DIR: ${{ github.workspace }}/gsi_work
 
 permissions:
@@ -31,6 +36,17 @@ jobs:
             scripts/*
           sparse-checkout-cone-mode: false
 
+      - name: Set API URL
+        id: set_api
+        run: |
+          if [[ -n "${{ github.event.inputs.source_api_url }}" ]]; then
+            echo "api_url=${{ github.event.inputs.source_api_url }}" >> $GITHUB_OUTPUT
+            echo "Using custom API URL: ${{ github.event.inputs.source_api_url }}"
+          else
+            echo "api_url=${{ env.DEFAULT_API_URL }}" >> $GITHUB_OUTPUT
+            echo "Using default API URL: ${{ env.DEFAULT_API_URL }}"
+          fi
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -40,20 +56,24 @@ jobs:
         id: fetch
         run: |
           mkdir -p ${{ env.WORK_DIR }}
-          curl -fsSL "${{ env.SOURCE_API_URL }}" -o "${{ env.WORK_DIR }}/releases.json"
+          curl -fsSL "${{ steps.set_api.outputs.api_url }}" -o "${{ env.WORK_DIR }}/releases.json"
           
           TARGET_VERSION="${{ github.event.inputs.release_version }}"
           
           if [[ -z "$TARGET_VERSION" ]]; then
+            # Get latest release
             LATEST_RELEASE=$(jq -r '.[0]' "${{ env.WORK_DIR }}/releases.json")
             echo "Using latest release"
           else
+            # Search in release name field (contains version like "Infinity X 3.9")
             echo "Searching for version: $TARGET_VERSION"
-            LATEST_RELEASE=$(jq --arg ver "$TARGET_VERSION" 'map(select(.tag_name | contains($ver))) | .[0]' "${{ env.WORK_DIR }}/releases.json")
+            LATEST_RELEASE=$(jq --arg ver "$TARGET_VERSION" 'map(select(.name | test($ver; "i"))) | .[0]' "${{ env.WORK_DIR }}/releases.json")
             
             if [[ "$LATEST_RELEASE" == "null" || -z "$LATEST_RELEASE" ]]; then
-              echo "::error::Version $TARGET_VERSION not found. Available versions:"
-              jq -r '.[].tag_name' "${{ env.WORK_DIR }}/releases.json"
+              echo "::error::Version $TARGET_VERSION not found in release names"
+              echo ""
+              echo "Available releases:"
+              jq -r '.[] | "\(.tag_name) - \(.name)"' "${{ env.WORK_DIR }}/releases.json"
               exit 1
             fi
           fi
@@ -64,20 +84,25 @@ jobs:
           fi
           
           RELEASE_TAG=$(echo "$LATEST_RELEASE" | jq -r '.tag_name')
+          RELEASE_NAME=$(echo "$LATEST_RELEASE" | jq -r '.name')
           echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          echo "release_name=$RELEASE_NAME" >> $GITHUB_OUTPUT
           
+          # Find VANILLA and GAPPS assets
           VANILLA_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | test("VANILLA"; "i")) | .browser_download_url' | head -1)
           GAPPS_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | test("GAPPS"; "i")) | .browser_download_url' | head -1)
           
           if [[ -z "$VANILLA_URL" || -z "$GAPPS_URL" ]]; then
             echo "::error::Required assets not found"
+            echo "VANILLA: $VANILLA_URL"
+            echo "GAPPS: $GAPPS_URL"
             exit 1
           fi
           
           echo "vanilla_url=$VANILLA_URL" >> $GITHUB_OUTPUT
           echo "gapps_url=$GAPPS_URL" >> $GITHUB_OUTPUT
           
-          echo "Found release: $RELEASE_TAG"
+          echo "Found release: $RELEASE_NAME ($RELEASE_TAG)"
           
       - name: Download VANILLA
         run: |
@@ -139,7 +164,9 @@ jobs:
           {
             echo "# GSI Image Comparison: VANILLA vs GAPPS"
             echo ""
-            echo "Release: ${{ steps.fetch.outputs.release_tag }}"
+            echo "Release: ${{ steps.fetch.outputs.release_name }}"
+            echo "Tag: ${{ steps.fetch.outputs.release_tag }}"
+            echo "Source: ${{ steps.set_api.outputs.api_url }}"
             echo "Comparison date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
             echo ""
             echo "## Filtered differences (system/, system_ext/, product/ - no build.prop)"
@@ -245,7 +272,9 @@ jobs:
           {
             echo "## Comparison Complete"
             echo ""
-            echo "**Release:** ${{ steps.fetch.outputs.release_tag }}"
+            echo "**Release:** ${{ steps.fetch.outputs.release_name }}"
+            echo "**Tag:** ${{ steps.fetch.outputs.release_tag }}"
+            echo "**Source:** ${{ steps.set_api.outputs.api_url }}"
             echo ""
             echo "### Artifacts"
             echo "| Artifact | Description |"
