@@ -161,7 +161,7 @@ jobs:
           echo "GAPPS extracted successfully"
           echo "GAPPS_EXTRACTED=$GAPPS_OUT" >> $GITHUB_ENV
 
-      - name: Generate file lists and diff
+      - name: Generate file lists and full diff
         run: |
           cd ${{ env.WORK_DIR }}/extracted
           
@@ -171,14 +171,37 @@ jobs:
           find vanilla -type d | sort > ${{ env.WORK_DIR }}/vanilla_dirs.txt
           find gapps -type d | sort > ${{ env.WORK_DIR }}/gapps_dirs.txt
           
-          echo "VANILLA files: $(wc -l < ${{ env.WORK_DIR }}/vanilla_files.txt)"
-          echo "GAPPS files: $(wc -l < ${{ env.WORK_DIR }}/gapps_files.txt)"
+          echo "VANILLA total files: $(wc -l < ${{ env.WORK_DIR }}/vanilla_files.txt)"
+          echo "GAPPS total files: $(wc -l < ${{ env.WORK_DIR }}/gapps_files.txt)"
           
-          echo "Generating diff..."
+          echo "Generating full diff..."
           diff -qr vanilla gapps > ${{ env.WORK_DIR }}/full_diff.txt 2>&1 || true
-          grep -E '(system/|system_ext/|product/)' ${{ env.WORK_DIR }}/full_diff.txt | grep -v 'build\.prop' > ${{ env.WORK_DIR }}/filtered_diff.txt || true
           
-          echo "Filtered differences found: $(wc -l < ${{ env.WORK_DIR }}/filtered_diff.txt)"
+          echo "Full diff lines: $(wc -l < ${{ env.WORK_DIR }}/full_diff.txt)"
+          
+          # Show diff summary
+          echo ""
+          echo "=== DIFF SUMMARY ==="
+          echo "Only in vanilla: $(grep -c '^Only in vanilla' ${{ env.WORK_DIR }}/full_diff.txt || echo 0)"
+          echo "Only in gapps: $(grep -c '^Only in gapps' ${{ env.WORK_DIR }}/full_diff.txt || echo 0)"
+          echo "Differ: $(grep -c '^Files.*differ' ${{ env.WORK_DIR }}/full_diff.txt || echo 0)"
+          
+          # Full diff content for debugging
+          echo ""
+          echo "=== FULL DIFF (first 50 lines) ==="
+          head -50 ${{ env.WORK_DIR }}/full_diff.txt
+          echo "..."
+          echo ""
+          echo "=== ONLY IN GAPPS (first 30) ==="
+          grep '^Only in gapps' ${{ env.WORK_DIR }}/full_diff.txt | head -30 || echo "None"
+          echo ""
+          echo "=== FILES THAT DIFFER (first 30) ==="
+          grep '^Files.*differ' ${{ env.WORK_DIR }}/full_diff.txt | head -30 || echo "None"
+          
+          # Filtered diff for report (excluding build.prop)
+          grep -E '(system/|system_ext/|product/)' ${{ env.WORK_DIR }}/full_diff.txt | grep -v 'build\.prop' > ${{ env.WORK_DIR }}/filtered_diff.txt || true
+          echo ""
+          echo "Filtered diff lines: $(wc -l < ${{ env.WORK_DIR }}/filtered_diff.txt)"
 
       - name: Generate comparison report
         run: |
@@ -199,12 +222,18 @@ jobs:
           
           ---
           
-          ## Filtered differences
-          
-          Filter: \`system/\`, \`system_ext/\`, \`product/\` - excluding \`build.prop\`
+          ## Full diff (system/, system_ext/, product/ - excluding build.prop)
           
           \`\`\`diff
           $(cat ${{ env.WORK_DIR }}/filtered_diff.txt)
+          \`\`\`
+          
+          ---
+          
+          ## Complete diff (all files)
+          
+          \`\`\`diff
+          $(cat ${{ env.WORK_DIR }}/full_diff.txt)
           \`\`\`
           EOF
 
@@ -216,41 +245,55 @@ jobs:
           ZIP_DIR="${{ env.WORK_DIR }}/gapps_to_vanilla_zip"
           mkdir -p "$ZIP_DIR/system" "$ZIP_DIR/system_ext" "$ZIP_DIR/product"
           
-          echo "Analyzing differences..."
+          echo "=== PROCESSING FULL DIFF ==="
           
-          # Check if input files exist and have content
-          if [[ ! -s ${{ env.WORK_DIR }}/vanilla_files.txt ]]; then
-            echo "::error::vanilla_files.txt is empty or missing"
-            exit 1
-          fi
+          # 1. Files only in GAPPS -> need to DELETE
+          echo ""
+          echo "1. Finding files only in GAPPS (to delete)..."
+          grep '^Only in gapps' ${{ env.WORK_DIR }}/full_diff.txt | \
+            sed 's/Only in gapps: //' | \
+            sed 's/: /\//' > ${{ env.WORK_DIR }}/gapps_only_raw.txt || touch ${{ env.WORK_DIR }}/gapps_only_raw.txt
           
-          if [[ ! -s ${{ env.WORK_DIR }}/gapps_files.txt ]]; then
-            echo "::error::gapps_files.txt is empty or missing"
-            exit 1
-          fi
+          # Filter to keep only system/, system_ext/, product/ - exclude build.prop
+          grep -E '^(system/|system_ext/|product/)' ${{ env.WORK_DIR }}/gapps_only_raw.txt | \
+            grep -v 'build\.prop' > ${{ env.WORK_DIR }}/gapps_only_files.txt || touch ${{ env.WORK_DIR }}/gapps_only_files.txt
           
-          # Files only in GAPPS (need to delete)
-          set +e
-          comm -13 ${{ env.WORK_DIR }}/vanilla_files.txt ${{ env.WORK_DIR }}/gapps_files.txt 2>/dev/null | \
-            grep -E '^(system/|system_ext/|product/)' | grep -v 'build\.prop' > ${{ env.WORK_DIR }}/gapps_only_files.txt
           GAPPS_ONLY_COUNT=$(wc -l < ${{ env.WORK_DIR }}/gapps_only_files.txt)
-          echo "  GAPPS-only files: $GAPPS_ONLY_COUNT"
+          echo "  Files to delete: $GAPPS_ONLY_COUNT"
+          head -20 ${{ env.WORK_DIR }}/gapps_only_files.txt
           
-          # Files only in VANILLA (need to restore)
-          comm -23 ${{ env.WORK_DIR }}/vanilla_files.txt ${{ env.WORK_DIR }}/gapps_files.txt 2>/dev/null | \
-            grep -E '^(system/|system_ext/|product/)' | grep -v 'build\.prop' > ${{ env.WORK_DIR }}/vanilla_only_files.txt
+          # 2. Files only in VANILLA -> need to RESTORE (copy from vanilla)
+          echo ""
+          echo "2. Finding files only in VANILLA (to restore)..."
+          grep '^Only in vanilla' ${{ env.WORK_DIR }}/full_diff.txt | \
+            sed 's/Only in vanilla: //' | \
+            sed 's/: /\//' > ${{ env.WORK_DIR }}/vanilla_only_raw.txt || touch ${{ env.WORK_DIR }}/vanilla_only_raw.txt
+          
+          grep -E '^(system/|system_ext/|product/)' ${{ env.WORK_DIR }}/vanilla_only_raw.txt | \
+            grep -v 'build\.prop' > ${{ env.WORK_DIR }}/vanilla_only_files.txt || touch ${{ env.WORK_DIR }}/vanilla_only_files.txt
+          
           VANILLA_ONLY_COUNT=$(wc -l < ${{ env.WORK_DIR }}/vanilla_only_files.txt)
-          echo "  VANILLA-only files: $VANILLA_ONLY_COUNT"
+          echo "  Files to restore (vanilla only): $VANILLA_ONLY_COUNT"
+          head -20 ${{ env.WORK_DIR }}/vanilla_only_files.txt
           
-          # Files that differ between versions
-          grep "differ" ${{ env.WORK_DIR }}/full_diff.txt 2>/dev/null | \
-            grep -E '(system/|system_ext/|product/)' | grep -v 'build\.prop' | \
-            awk '{print $2}' | sed 's/^vanilla\///' > ${{ env.WORK_DIR }}/different_files.txt
+          # 3. Files that DIFFER -> need to REPLACE with vanilla version
+          echo ""
+          echo "3. Finding files that differ (to replace)..."
+          grep '^Files.*differ' ${{ env.WORK_DIR }}/full_diff.txt | \
+            sed 's/^Files //' | sed 's/ and .* differ//' | \
+            sed 's/^vanilla\///' > ${{ env.WORK_DIR }}/different_raw.txt || touch ${{ env.WORK_DIR }}/different_raw.txt
+          
+          grep -E '^(system/|system_ext/|product/)' ${{ env.WORK_DIR }}/different_raw.txt | \
+            grep -v 'build\.prop' > ${{ env.WORK_DIR }}/different_files.txt || touch ${{ env.WORK_DIR }}/different_files.txt
+          
           DIFF_FILES_COUNT=$(wc -l < ${{ env.WORK_DIR }}/different_files.txt)
-          echo "  Different files: $DIFF_FILES_COUNT"
-          set -e
+          echo "  Files to replace: $DIFF_FILES_COUNT"
+          head -20 ${{ env.WORK_DIR }}/different_files.txt
           
-          echo "Copying vanilla files for restoration..."
+          # COPY vanilla-only files
+          echo ""
+          echo "=== COPYING FILES ==="
+          echo "Copying vanilla-only files..."
           VANILLA_COUNT=0
           if [[ -s ${{ env.WORK_DIR }}/vanilla_only_files.txt ]]; then
             while IFS= read -r file; do
@@ -262,8 +305,10 @@ jobs:
               fi
             done < ${{ env.WORK_DIR }}/vanilla_only_files.txt
           fi
-          echo "  Vanilla-only files copied: $VANILLA_COUNT"
+          echo "  Copied: $VANILLA_COUNT files"
           
+          # COPY different files (replace with vanilla)
+          echo "Copying modified files..."
           DIFF_COUNT=0
           if [[ -s ${{ env.WORK_DIR }}/different_files.txt ]]; then
             while IFS= read -r file; do
@@ -275,33 +320,39 @@ jobs:
               fi
             done < ${{ env.WORK_DIR }}/different_files.txt
           fi
-          echo "  Modified files copied: $DIFF_COUNT"
+          echo "  Copied: $DIFF_COUNT files"
           
+          # CREATE delete list
+          echo ""
           echo "Creating delete list..."
           if [[ -s ${{ env.WORK_DIR }}/gapps_only_files.txt ]]; then
             while IFS= read -r file; do
               if [[ -n "$file" ]]; then
-                RELATIVE_PATH=$(echo "$file" | sed 's/^gapps\///')
-                echo "/$RELATIVE_PATH" >> "$ZIP_DIR/delete.list"
+                echo "/$file" >> "$ZIP_DIR/delete.list"
               fi
             done < ${{ env.WORK_DIR }}/gapps_only_files.txt
-          fi
-          
-          if [[ -f "$ZIP_DIR/delete.list" ]]; then
             DELETE_COUNT=$(wc -l < "$ZIP_DIR/delete.list")
           else
-            DELETE_COUNT=0
             touch "$ZIP_DIR/delete.list"
+            DELETE_COUNT=0
           fi
-          echo "  Files to delete: $DELETE_COUNT"
+          echo "  Delete list entries: $DELETE_COUNT"
+          head -20 "$ZIP_DIR/delete.list"
           
-          echo "Creating recovery ZIP structure..."
+          # SHOW what's in the ZIP
+          echo ""
+          echo "=== ZIP CONTENTS PREVIEW ==="
+          echo "Files in ZIP structure:"
+          find "$ZIP_DIR" -type f -not -path "*/META-INF/*" | head -50
+          
+          # Create META-INF
+          echo ""
+          echo "=== CREATING ZIP ==="
           mkdir -p "$ZIP_DIR/META-INF/com/google/android"
           
           if [[ -f "${{ github.workspace }}/scripts/update-binary" ]]; then
             cp "${{ github.workspace }}/scripts/update-binary" "$ZIP_DIR/META-INF/com/google/android/update-binary"
             chmod +x "$ZIP_DIR/META-INF/com/google/android/update-binary"
-            echo "  update-binary copied"
           else
             echo "::error::scripts/update-binary not found"
             exit 1
@@ -309,7 +360,6 @@ jobs:
           
           if [[ -f "${{ github.workspace }}/scripts/updater-script" ]]; then
             cp "${{ github.workspace }}/scripts/updater-script" "$ZIP_DIR/META-INF/com/google/android/updater-script"
-            echo "  updater-script copied"
           else
             echo "::error::scripts/updater-script not found"
             exit 1
@@ -366,20 +416,16 @@ jobs:
             echo "| Release | ${{ steps.fetch.outputs.release_name }} |"
             echo "| Tag | ${{ steps.fetch.outputs.release_tag }} |"
             echo "| Published | ${{ steps.fetch.outputs.release_date }} |"
-            echo "| Source | ${{ steps.set_api.outputs.api_url }} |"
             echo ""
             echo "### Generated Artifacts"
             echo "| Artifact | Description |"
             echo "|----------|-------------|"
-            echo "| comparison-report-${{ steps.fetch.outputs.release_tag }} | Full comparison report with filtered diff |"
+            echo "| comparison-report-${{ steps.fetch.outputs.release_tag }} | Full comparison report |"
             echo "| ${{ steps.generate_zip.outputs.zip_name }} | Recovery-flashable ZIP (${{ steps.generate_zip.outputs.zip_size }}) |"
             echo ""
             echo "### How to use"
             echo "1. Download ${{ steps.generate_zip.outputs.zip_name }}"
             echo "2. Boot into TWRP/OrangeFox recovery"
             echo "3. Flash the ZIP"
-            echo "4. Wipe cache/dalvik (optional)"
-            echo "5. Reboot system"
-            echo ""
-            echo "The ZIP will remove GAPPS files and restore original AOSP files from VANILLA build."
+            echo "4. Reboot system"
           } >> $GITHUB_STEP_SUMMARY
