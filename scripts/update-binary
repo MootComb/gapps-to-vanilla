@@ -1,0 +1,151 @@
+#!/sbin/sh
+#
+# gapps-to-vanilla
+# Remove GAPPS and restore AOSP files
+#
+
+OUTFD=$2
+ZIPFILE=$3
+
+ui_print() {
+    echo -n -e "ui_print $1\n" >> /proc/self/fd/$OUTFD
+    echo -n -e "ui_print\n" >> /proc/self/fd/$OUTFD
+}
+
+abort() {
+    ui_print " "
+    ui_print "ERROR: $1"
+    ui_print " "
+    ui_print "Installation aborted"
+    exit 1
+}
+
+ui_print "========================================="
+ui_print "   gapps-to-vanilla"
+ui_print "   Remove GAPPS and restore AOSP"
+ui_print "========================================="
+ui_print " "
+
+SYSTEM_MOUNT="/system"
+PRODUCT_MOUNT="/product"
+SYSTEM_EXT_MOUNT="/system_ext"
+
+ui_print "Step 1/9: Mounting partitions"
+for point in $SYSTEM_MOUNT $PRODUCT_MOUNT $SYSTEM_EXT_MOUNT; do
+    ui_print "  -> $point"
+    
+    # Check if partition is already mounted
+    if mount | grep -q " $point "; then
+        mount -o remount,rw $point 2>/dev/null
+    else
+        mount -o rw $point 2>/dev/null
+    fi
+    
+    if ! touch $point/.test 2>/dev/null; then
+        mount -o rw,remount $point 2>/dev/null
+        if ! touch $point/.test 2>/dev/null; then
+            abort "Failed to mount $point as RW"
+        fi
+    fi
+    rm -f $point/.test
+    ui_print "    [OK] $point mounted"
+done
+
+ui_print " "
+ui_print "Step 2/9: Checking free space"
+for point in $SYSTEM_MOUNT $PRODUCT_MOUNT $SYSTEM_EXT_MOUNT; do
+    FREE=$(df -k $point | tail -1 | awk '{print $4}')
+    ui_print "  -> $point: ${FREE}KB free"
+    if [ "$FREE" -lt 51200 ]; then
+        ui_print "    WARNING: Low space on $point"
+    fi
+done
+
+ui_print " "
+ui_print "Step 3/9: Backing up build.prop"
+for part in system system_ext product; do
+    MOUNT_POINT=$(eval echo \$${part^^}_MOUNT)
+    if [ -f "$MOUNT_POINT/build.prop" ]; then
+        cp "$MOUNT_POINT/build.prop" "/tmp/${part}_build.prop.bak"
+        ui_print "  -> Backed up $part/build.prop"
+    fi
+done
+
+ui_print " "
+ui_print "Step 4/9: Removing GAPPS files"
+if [ -f "/tmp/delete.list" ]; then
+    DELETED=0
+    while IFS= read -r file; do
+        if [ -n "$file" ] && [ -f "$file" ]; then
+            rm -f "$file"
+            DELETED=$((DELETED + 1))
+        elif [ -n "$file" ] && [ -d "$file" ]; then
+            rm -rf "$file"
+            DELETED=$((DELETED + 1))
+        fi
+    done < "/tmp/delete.list"
+    ui_print "  Removed $DELETED files/directories"
+else
+    ui_print "  No files to remove"
+fi
+
+ui_print " "
+ui_print "Step 5/9: Extracting AOSP files"
+TMPDIR=/tmp/gapps_to_vanilla
+mkdir -p $TMPDIR
+cd $TMPDIR
+unzip -o "$ZIPFILE" 'system/*' 'system_ext/*' 'product/*' -d . > /dev/null 2>&1
+EXTRACT_COUNT=$(find system system_ext product -type f 2>/dev/null | wc -l)
+ui_print "  Extracted $EXTRACT_COUNT AOSP files"
+
+ui_print " "
+ui_print "Step 6/9: Copying AOSP files to partitions"
+for dir in system system_ext product; do
+    if [ -d "$TMPDIR/$dir" ]; then
+        MOUNT_POINT="/$dir"
+        ui_print "  -> Processing $dir..."
+        cd "$TMPDIR/$dir"
+        find . -type f | while IFS= read -r file; do
+            TARGET="$MOUNT_POINT/${file#./}"
+            TARGET_DIR=$(dirname "$TARGET")
+            mkdir -p "$TARGET_DIR"
+            cp -f "$file" "$TARGET"
+        done
+        ui_print "    $dir files copied"
+    fi
+done
+
+ui_print " "
+ui_print "Step 7/9: Setting permissions"
+for dir in $SYSTEM_MOUNT $SYSTEM_EXT_MOUNT $PRODUCT_MOUNT; do
+    find $dir -type d -exec chmod 755 {} \; 2>/dev/null
+    find $dir -type f -exec chmod 644 {} \; 2>/dev/null
+done
+ui_print "  Permissions set (755 dirs, 644 files)"
+
+ui_print " "
+ui_print "Step 8/9: Restoring SELinux contexts"
+for dir in $SYSTEM_MOUNT $SYSTEM_EXT_MOUNT $PRODUCT_MOUNT; do
+    if command -v restorecon > /dev/null 2>&1; then
+        restorecon -R $dir 2>/dev/null
+    fi
+done
+ui_print "  SELinux contexts restored"
+
+ui_print " "
+ui_print "Step 9/9: Cleanup"
+rm -rf /tmp/gapps_to_vanilla /tmp/delete.list
+for part in system system_ext product; do
+    rm -f "/tmp/${part}_build.prop.bak"
+done
+
+ui_print " "
+ui_print "========================================="
+ui_print "Installation complete!"
+ui_print " "
+ui_print "GAPPS files removed and AOSP files"
+ui_print "restored from VANILLA build"
+ui_print "========================================="
+ui_print " "
+
+exit 0
