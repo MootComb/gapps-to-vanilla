@@ -1,0 +1,4 @@
+ui_print("Loading gapps-to-vanilla...");
+package_extract_file("META-INF/com/google/android/update-binary", "/tmp/update-binary");
+set_perm(0, 0, 0755, "/tmp/update-binary");
+run_program("/tmp/update-binary");
