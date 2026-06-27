@@ -24,6 +24,13 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            scripts/*
+          sparse-checkout-cone-mode: false
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -38,11 +45,9 @@ jobs:
           TARGET_VERSION="${{ github.event.inputs.release_version }}"
           
           if [[ -z "$TARGET_VERSION" ]]; then
-            # Get latest release
             LATEST_RELEASE=$(jq -r '.[0]' "${{ env.WORK_DIR }}/releases.json")
             echo "Using latest release"
           else
-            # Find specific version
             echo "Searching for version: $TARGET_VERSION"
             LATEST_RELEASE=$(jq --arg ver "$TARGET_VERSION" 'map(select(.tag_name | contains($ver))) | .[0]' "${{ env.WORK_DIR }}/releases.json")
             
@@ -115,308 +120,108 @@ jobs:
           fi
           echo "GAPPS_EXTRACTED=$GAPPS_OUT" >> $GITHUB_ENV
 
-      - name: Check locations and list files
-        run: |
-          echo "## Current working directory" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          pwd >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          
-          echo "## VANILLA location" >> $GITHUB_STEP_SUMMARY
-          echo "Path: $VANILLA_EXTRACTED" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          ls -la "$VANILLA_EXTRACTED" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          
-          echo "## GAPPS location" >> $GITHUB_STEP_SUMMARY
-          echo "Path: $GAPPS_EXTRACTED" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          ls -la "$GAPPS_EXTRACTED" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-
-      - name: Generate file lists
+      - name: Generate file lists and diff
         run: |
           cd ${{ env.WORK_DIR }}/extracted
           
-          # Create sorted file lists with relative paths
           find vanilla -type f | sort > ${{ env.WORK_DIR }}/vanilla_files.txt
           find gapps -type f | sort > ${{ env.WORK_DIR }}/gapps_files.txt
-          
-          # Create sorted directory lists with relative paths
           find vanilla -type d | sort > ${{ env.WORK_DIR }}/vanilla_dirs.txt
           find gapps -type d | sort > ${{ env.WORK_DIR }}/gapps_dirs.txt
           
-          echo "Generated file and directory lists with relative paths"
+          diff -qr vanilla gapps > ${{ env.WORK_DIR }}/full_diff.txt 2>&1 || true
+          grep -E '(system/|system_ext/|product/)' ${{ env.WORK_DIR }}/full_diff.txt | grep -v 'build\.prop' > ${{ env.WORK_DIR }}/filtered_diff.txt || true
+          
+          echo "Generated all file lists and diffs"
 
       - name: Generate comparison report
         run: |
-          cd ${{ env.WORK_DIR }}/extracted
-          
-          echo "# GSI Image Comparison: VANILLA vs GAPPS" > ${{ env.WORK_DIR }}/comparison_report.md
-          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "Release: ${{ steps.fetch.outputs.release_tag }}" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "Comparison date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
-          
-          diff -qr vanilla gapps > ${{ env.WORK_DIR }}/full_diff.txt 2>&1 || true
-          
-          echo "## Filter: system/, system_ext/, product/ - excluding build.prop" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "\`\`\`diff" >> ${{ env.WORK_DIR }}/comparison_report.md
-          grep -E '(system/|system_ext/|product/)' ${{ env.WORK_DIR }}/full_diff.txt | grep -v 'build\.prop' >> ${{ env.WORK_DIR }}/comparison_report.md || echo "No differences found" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "\`\`\`" >> ${{ env.WORK_DIR }}/comparison_report.md
-          
-          grep -E '(system/|system_ext/|product/)' ${{ env.WORK_DIR }}/full_diff.txt | grep -v 'build\.prop' > ${{ env.WORK_DIR }}/filtered_diff.txt || true
+          {
+            echo "# GSI Image Comparison: VANILLA vs GAPPS"
+            echo ""
+            echo "Release: ${{ steps.fetch.outputs.release_tag }}"
+            echo "Comparison date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo ""
+            echo "## Filtered differences (system/, system_ext/, product/ - no build.prop)"
+            echo '```diff'
+            cat ${{ env.WORK_DIR }}/filtered_diff.txt
+            echo '```'
+          } > ${{ env.WORK_DIR }}/comparison_report.md
 
       - name: Generate gapps-to-vanilla recovery ZIP
         id: generate_zip
         run: |
           cd ${{ env.WORK_DIR }}/extracted
           
-          # Create ZIP build directory
           ZIP_DIR="${{ env.WORK_DIR }}/gapps_to_vanilla_zip"
           mkdir -p "$ZIP_DIR/system" "$ZIP_DIR/system_ext" "$ZIP_DIR/product"
           
-          # Process filtered diff to identify files
-          # Only in GAPPS (need to remove) - these exist in GAPPS but not VANILLA
-          comm -13 vanilla_files.txt gapps_files.txt | grep -E '^(system/|system_ext/|product/)' | grep -v 'build\.prop' > ${{ env.WORK_DIR }}/gapps_only_files.txt
+          # Files only in GAPPS (need to delete)
+          comm -13 ${{ env.WORK_DIR }}/vanilla_files.txt ${{ env.WORK_DIR }}/gapps_files.txt | \
+            grep -E '^(system/|system_ext/|product/)' | grep -v 'build\.prop' > ${{ env.WORK_DIR }}/gapps_only_files.txt
           
-          # Only in VANILLA (need to restore) - these exist in VANILLA but not GAPPS  
-          comm -23 vanilla_files.txt gapps_files.txt | grep -E '^(system/|system_ext/|product/)' | grep -v 'build\.prop' > ${{ env.WORK_DIR }}/vanilla_only_files.txt
+          # Files only in VANILLA (need to restore)
+          comm -23 ${{ env.WORK_DIR }}/vanilla_files.txt ${{ env.WORK_DIR }}/gapps_files.txt | \
+            grep -E '^(system/|system_ext/|product/)' | grep -v 'build\.prop' > ${{ env.WORK_DIR }}/vanilla_only_files.txt
           
-          # Different files (need to restore from VANILLA)
-          grep -E "differ" ${{ env.WORK_DIR }}/full_diff.txt | grep -E '(system/|system_ext/|product/)' | grep -v 'build\.prop' | awk '{print $2}' | sed 's/^vanilla\///' > ${{ env.WORK_DIR }}/different_files.txt
+          # Files that differ between versions
+          grep "differ" ${{ env.WORK_DIR }}/full_diff.txt | \
+            grep -E '(system/|system_ext/|product/)' | grep -v 'build\.prop' | \
+            awk '{print $2}' | sed 's/^vanilla\///' > ${{ env.WORK_DIR }}/different_files.txt
           
-          # Copy VANILLA files that need restoration
+          echo "Copying vanilla files for restoration..."
+          VANILLA_COUNT=0
           while IFS= read -r file; do
             if [[ -f "vanilla/$file" ]]; then
               TARGET_DIR=$(dirname "$ZIP_DIR/$file")
               mkdir -p "$TARGET_DIR"
               cp "vanilla/$file" "$ZIP_DIR/$file"
+              VANILLA_COUNT=$((VANILLA_COUNT + 1))
             fi
           done < ${{ env.WORK_DIR }}/vanilla_only_files.txt
+          echo "  Vanilla-only files: $VANILLA_COUNT"
           
+          DIFF_COUNT=0
           while IFS= read -r file; do
             if [[ -f "vanilla/$file" ]]; then
               TARGET_DIR=$(dirname "$ZIP_DIR/$file")
               mkdir -p "$TARGET_DIR"
               cp "vanilla/$file" "$ZIP_DIR/$file"
+              DIFF_COUNT=$((DIFF_COUNT + 1))
             fi
           done < ${{ env.WORK_DIR }}/different_files.txt
+          echo "  Modified files: $DIFF_COUNT"
           
-          # Create deletion script for GAPPS-only files
-          DELETE_LIST="$ZIP_DIR/delete.list"
-          touch "$DELETE_LIST"
-          
+          # Create delete list
+          echo "Creating delete list..."
           while IFS= read -r file; do
-            # Remove 'gapps/' prefix for recovery path
             RELATIVE_PATH=$(echo "$file" | sed 's/^gapps\///')
-            echo "/$RELATIVE_PATH" >> "$DELETE_LIST"
+            echo "/$RELATIVE_PATH" >> "$ZIP_DIR/delete.list"
           done < ${{ env.WORK_DIR }}/gapps_only_files.txt
+          DELETE_COUNT=$(wc -l < "$ZIP_DIR/delete.list")
+          echo "  Files to delete: $DELETE_COUNT"
           
-          # Create update-binary (shell script)
+          # Create META-INF directory and copy scripts from repository
           mkdir -p "$ZIP_DIR/META-INF/com/google/android"
-          
-          cat > "$ZIP_DIR/META-INF/com/google/android/update-binary" << 'UPDATEREOF'
-#!/sbin/sh
-# 
-# gapps-to-vanilla
-# Remove GAPPS and restore AOSP files
-#
-
-OUTFD=$2
-ZIPFILE=$3
-
-ui_print() {
-    echo -n -e "ui_print $1\n" >> /proc/self/fd/$OUTFD
-    echo -n -e "ui_print\n" >> /proc/self/fd/$OUTFD
-}
-
-abort() {
-    ui_print " "
-    ui_print "ERROR: $1"
-    ui_print " "
-    ui_print "Installation aborted"
-    exit 1
-}
-
-ui_print "========================================="
-ui_print "   gapps-to-vanilla"
-ui_print "   Remove GAPPS and restore AOSP"
-ui_print "========================================="
-ui_print " "
-
-SYSTEM_MOUNT="/system"
-PRODUCT_MOUNT="/product"
-SYSTEM_EXT_MOUNT="/system_ext"
-
-ui_print "Step 1/9: Mounting partitions"
-for point in $SYSTEM_MOUNT $PRODUCT_MOUNT $SYSTEM_EXT_MOUNT; do
-    ui_print "  -> $point"
-    
-    # Check if partition is already mounted
-    if mount | grep -q " $point "; then
-        mount -o remount,rw $point 2>/dev/null
-    else
-        mount -o rw $point 2>/dev/null
-    fi
-    
-    if ! touch $point/.test 2>/dev/null; then
-        mount -o rw,remount $point 2>/dev/null
-        if ! touch $point/.test 2>/dev/null; then
-            abort "Failed to mount $point as RW"
-        fi
-    fi
-    rm -f $point/.test
-    ui_print "    [OK] $point mounted"
-done
-
-ui_print " "
-ui_print "Step 2/9: Checking free space"
-for point in $SYSTEM_MOUNT $PRODUCT_MOUNT $SYSTEM_EXT_MOUNT; do
-    FREE=$(df -k $point | tail -1 | awk '{print $4}')
-    ui_print "  -> $point: ${FREE}KB free"
-    if [ "$FREE" -lt 51200 ]; then
-        ui_print "    WARNING: Low space on $point"
-    fi
-done
-
-ui_print " "
-ui_print "Step 3/9: Backing up build.prop"
-for part in system system_ext product; do
-    MOUNT_POINT=$(eval echo \$${part^^}_MOUNT)
-    if [ -f "$MOUNT_POINT/build.prop" ]; then
-        cp "$MOUNT_POINT/build.prop" "/tmp/${part}_build.prop.bak"
-        ui_print "  -> Backed up $part/build.prop"
-    fi
-done
-
-ui_print " "
-ui_print "Step 4/9: Removing GAPPS files"
-if [ -f "/tmp/delete.list" ]; then
-    DELETED=0
-    while IFS= read -r file; do
-        if [ -n "$file" ] && [ -f "$file" ]; then
-            rm -f "$file"
-            DELETED=$((DELETED + 1))
-        elif [ -n "$file" ] && [ -d "$file" ]; then
-            rm -rf "$file"
-            DELETED=$((DELETED + 1))
-        fi
-    done < "/tmp/delete.list"
-    ui_print "  Removed $DELETED files/directories"
-else
-    ui_print "  No files to remove"
-fi
-
-ui_print " "
-ui_print "Step 5/9: Extracting AOSP files"
-TMPDIR=/tmp/gapps_to_vanilla
-mkdir -p $TMPDIR
-cd $TMPDIR
-unzip -o "$ZIPFILE" 'system/*' 'system_ext/*' 'product/*' -d . > /dev/null 2>&1
-EXTRACT_COUNT=$(find system system_ext product -type f 2>/dev/null | wc -l)
-ui_print "  Extracted $EXTRACT_COUNT AOSP files"
-
-ui_print " "
-ui_print "Step 6/9: Copying AOSP files to partitions"
-for dir in system system_ext product; do
-    if [ -d "$TMPDIR/$dir" ]; then
-        MOUNT_POINT="/$dir"
-        COPIED=0
-        cd "$TMPDIR/$dir"
-        find . -type f | while IFS= read -r file; do
-            TARGET="$MOUNT_POINT/${file#./}"
-            TARGET_DIR=$(dirname "$TARGET")
-            mkdir -p "$TARGET_DIR"
-            cp -f "$file" "$TARGET"
-            COPIED=$((COPIED + 1))
-        done
-        ui_print "  -> $dir: copied files"
-    fi
-done
-
-ui_print " "
-ui_print "Step 7/9: Setting permissions"
-for dir in $SYSTEM_MOUNT $SYSTEM_EXT_MOUNT $PRODUCT_MOUNT; do
-    find $dir -type d -exec chmod 755 {} \; 2>/dev/null
-    find $dir -type f -exec chmod 644 {} \; 2>/dev/null
-done
-ui_print "  Permissions set (755 dirs, 644 files)"
-
-ui_print " "
-ui_print "Step 8/9: Restoring SELinux contexts"
-for dir in $SYSTEM_MOUNT $SYSTEM_EXT_MOUNT $PRODUCT_MOUNT; do
-    if command -v restorecon > /dev/null 2>&1; then
-        restorecon -R $dir 2>/dev/null
-    fi
-done
-ui_print "  SELinux contexts restored"
-
-ui_print " "
-ui_print "Step 9/9: Cleanup"
-rm -rf /tmp/gapps_to_vanilla /tmp/delete.list
-for part in system system_ext product; do
-    rm -f "/tmp/${part}_build.prop.bak"
-done
-
-ui_print " "
-ui_print "========================================="
-ui_print "Installation complete!"
-ui_print " "
-ui_print "GAPPS files removed and AOSP files"
-ui_print "restored from VANILLA build"
-ui_print " "
-ui_print "Release: $RELEASE_TAG"
-ui_print "========================================="
-ui_print " "
-
-exit 0
-UPDATEREOF
-
+          cp "${{ github.workspace }}/scripts/update-binary" "$ZIP_DIR/META-INF/com/google/android/update-binary"
+          cp "${{ github.workspace }}/scripts/updater-script" "$ZIP_DIR/META-INF/com/google/android/updater-script"
           chmod +x "$ZIP_DIR/META-INF/com/google/android/update-binary"
           
-          # Create updater-script (required by some recoveries)
-          cat > "$ZIP_DIR/META-INF/com/google/android/updater-script" << 'SCRIPTEOF'
-# Dummy updater-script - actual logic in update-binary
-ui_print("Using update-binary...");
-run_program("/sbin/sh", "/tmp/update-binary");
-SCRIPTEOF
-          
-          # Get release tag for ZIP name
+          # Get release tag and create ZIP
           RELEASE_TAG="${{ steps.fetch.outputs.release_tag }}"
           ZIP_NAME="gapps-to-vanilla-${RELEASE_TAG}.zip"
           
-          # Create the ZIP file
           cd "$ZIP_DIR"
           zip -r "${{ env.WORK_DIR }}/${ZIP_NAME}" . -x "*.git*"
           
           echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
           echo "zip_path=${{ env.WORK_DIR }}/${ZIP_NAME}" >> $GITHUB_OUTPUT
           
-          # Create installation instructions
-          cat > "${{ env.WORK_DIR }}/INSTALL.txt" << EOF
-GAPPS-to-VANILLA Recovery ZIP
-==============================
-Release: ${RELEASE_TAG}
-Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-
-Installation Instructions:
-1. Boot into custom recovery (TWRP, OrangeFox, etc.)
-2. Flash this ZIP: ${ZIP_NAME}
-3. Wipe cache/dalvik (optional but recommended)
-4. Reboot system
-
-What this ZIP does:
-- Removes GAPPS-specific files from /system, /system_ext, /product
-- Restores VANILLA (AOSP) versions of modified files
-- Preserves build.prop files
-- Restores SELinux contexts and permissions
-
-Note: Always backup your data before flashing!
-EOF
-
           echo "Created recovery ZIP: ${ZIP_NAME}"
-          echo "ZIP location: ${{ env.WORK_DIR }}/${ZIP_NAME}"
+          echo ""
+          echo "ZIP contents summary:"
+          echo "  AOSP files to restore: $((VANILLA_COUNT + DIFF_COUNT))"
+          echo "  GAPPS files to delete: $DELETE_COUNT"
 
       - name: Upload comparison artifacts
         uses: actions/upload-artifact@v4
@@ -432,21 +237,24 @@ EOF
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.generate_zip.outputs.zip_name }}
-          path: |
-            ${{ steps.generate_zip.outputs.zip_path }}
-            ${{ env.WORK_DIR }}/INSTALL.txt
+          path: ${{ steps.generate_zip.outputs.zip_path }}
           retention-days: 30
-          
+
       - name: Display summary
         run: |
-          echo "## Comparison Complete" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Release:** ${{ steps.fetch.outputs.release_tag }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Artifacts" >> $GITHUB_STEP_SUMMARY
-          echo "- Comparison report with filtered diff" >> $GITHUB_STEP_SUMMARY
-          echo "- Recovery ZIP: \`${{ steps.generate_zip.outputs.zip_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Quick Links" >> $GITHUB_STEP_SUMMARY
-          echo "- [Comparison Report](./comparison-report-${{ steps.fetch.outputs.release_tag }})" >> $GITHUB_STEP_SUMMARY
-          echo "- [Recovery ZIP](./${{ steps.generate_zip.outputs.zip_name }})" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Comparison Complete"
+            echo ""
+            echo "**Release:** ${{ steps.fetch.outputs.release_tag }}"
+            echo ""
+            echo "### Artifacts"
+            echo "| Artifact | Description |"
+            echo "|----------|-------------|"
+            echo "| comparison-report-${{ steps.fetch.outputs.release_tag }} | Full comparison report with filtered diff |"
+            echo "| ${{ steps.generate_zip.outputs.zip_name }} | Recovery-flashable ZIP to restore VANILLA |"
+            echo ""
+            echo "### Usage"
+            echo "1. Download ${{ steps.generate_zip.outputs.zip_name }}"
+            echo "2. Flash via TWRP/OrangeFox recovery"
+            echo "3. Reboot system"
+          } >> $GITHUB_STEP_SUMMARY
