@@ -61,13 +61,16 @@ jobs:
           TARGET_VERSION="${{ github.event.inputs.release_version }}"
           
           if [[ -z "$TARGET_VERSION" ]]; then
-            # Get latest release
             LATEST_RELEASE=$(jq -r '.[0]' "${{ env.WORK_DIR }}/releases.json")
             echo "Using latest release"
           else
-            # Search in release name field (contains version like "Infinity X 3.9")
             echo "Searching for version: $TARGET_VERSION"
-            LATEST_RELEASE=$(jq --arg ver "$TARGET_VERSION" 'map(select(.name | test($ver; "i"))) | .[0]' "${{ env.WORK_DIR }}/releases.json")
+            LATEST_RELEASE=$(jq --arg ver "$TARGET_VERSION" '
+              map(select(.name | test($ver; "i"))) | 
+              sort_by(.published_at) | 
+              reverse | 
+              .[0]
+            ' "${{ env.WORK_DIR }}/releases.json")
             
             if [[ "$LATEST_RELEASE" == "null" || -z "$LATEST_RELEASE" ]]; then
               echo "::error::Version $TARGET_VERSION not found in release names"
@@ -76,6 +79,9 @@ jobs:
               jq -r '.[] | "\(.tag_name) - \(.name)"' "${{ env.WORK_DIR }}/releases.json"
               exit 1
             fi
+            
+            MATCH_COUNT=$(jq --arg ver "$TARGET_VERSION" '[.[] | select(.name | test($ver; "i"))] | length' "${{ env.WORK_DIR }}/releases.json")
+            echo "Found $MATCH_COUNT release(s) matching version $TARGET_VERSION, using latest"
           fi
           
           if [[ "$LATEST_RELEASE" == "null" ]]; then
@@ -85,10 +91,11 @@ jobs:
           
           RELEASE_TAG=$(echo "$LATEST_RELEASE" | jq -r '.tag_name')
           RELEASE_NAME=$(echo "$LATEST_RELEASE" | jq -r '.name')
+          RELEASE_DATE=$(echo "$LATEST_RELEASE" | jq -r '.published_at')
           echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
           echo "release_name=$RELEASE_NAME" >> $GITHUB_OUTPUT
+          echo "release_date=$RELEASE_DATE" >> $GITHUB_OUTPUT
           
-          # Find VANILLA and GAPPS assets
           VANILLA_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | test("VANILLA"; "i")) | .browser_download_url' | head -1)
           GAPPS_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | test("GAPPS"; "i")) | .browser_download_url' | head -1)
           
@@ -102,24 +109,30 @@ jobs:
           echo "vanilla_url=$VANILLA_URL" >> $GITHUB_OUTPUT
           echo "gapps_url=$GAPPS_URL" >> $GITHUB_OUTPUT
           
-          echo "Found release: $RELEASE_NAME ($RELEASE_TAG)"
+          echo "Selected release: $RELEASE_NAME ($RELEASE_TAG)"
+          echo "Published: $RELEASE_DATE"
           
       - name: Download VANILLA
         run: |
           mkdir -p ${{ env.WORK_DIR }}/downloads
+          echo "Downloading VANILLA..."
           curl -fL --retry 5 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/vanilla.img.xz" \
             "${{ steps.fetch.outputs.vanilla_url }}"
+          echo "VANILLA downloaded successfully"
           
       - name: Download GAPPS
         run: |
+          echo "Downloading GAPPS..."
           curl -fL --retry 5 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/gapps.img.xz" \
             "${{ steps.fetch.outputs.gapps_url }}"
+          echo "GAPPS downloaded successfully"
           
       - name: Extract VANILLA
         run: |
           VANILLA_OUT="${{ env.WORK_DIR }}/extracted/vanilla"
           mkdir -p "$VANILLA_OUT"
-    
+          
+          echo "Extracting VANILLA image..."
           xz -d "${{ env.WORK_DIR }}/downloads/vanilla.img.xz"
           set +e
           7z x "${{ env.WORK_DIR }}/downloads/vanilla.img" -o"$VANILLA_OUT"
@@ -128,13 +141,15 @@ jobs:
           if [ $EXIT_CODE -ne 0 ] && [ $EXIT_CODE -ne 2 ]; then
             exit $EXIT_CODE
           fi
+          echo "VANILLA extracted successfully"
           echo "VANILLA_EXTRACTED=$VANILLA_OUT" >> $GITHUB_ENV
 
       - name: Extract GAPPS
         run: |
           GAPPS_OUT="${{ env.WORK_DIR }}/extracted/gapps"
           mkdir -p "$GAPPS_OUT"
-    
+          
+          echo "Extracting GAPPS image..."
           xz -d "${{ env.WORK_DIR }}/downloads/gapps.img.xz"
           set +e
           7z x "${{ env.WORK_DIR }}/downloads/gapps.img" -o"$GAPPS_OUT"
@@ -143,37 +158,55 @@ jobs:
           if [ $EXIT_CODE -ne 0 ] && [ $EXIT_CODE -ne 2 ]; then
             exit $EXIT_CODE
           fi
+          echo "GAPPS extracted successfully"
           echo "GAPPS_EXTRACTED=$GAPPS_OUT" >> $GITHUB_ENV
 
       - name: Generate file lists and diff
         run: |
           cd ${{ env.WORK_DIR }}/extracted
           
+          echo "Generating file lists..."
           find vanilla -type f | sort > ${{ env.WORK_DIR }}/vanilla_files.txt
           find gapps -type f | sort > ${{ env.WORK_DIR }}/gapps_files.txt
           find vanilla -type d | sort > ${{ env.WORK_DIR }}/vanilla_dirs.txt
           find gapps -type d | sort > ${{ env.WORK_DIR }}/gapps_dirs.txt
           
+          echo "VANILLA files: $(wc -l < ${{ env.WORK_DIR }}/vanilla_files.txt)"
+          echo "GAPPS files: $(wc -l < ${{ env.WORK_DIR }}/gapps_files.txt)"
+          
+          echo "Generating diff..."
           diff -qr vanilla gapps > ${{ env.WORK_DIR }}/full_diff.txt 2>&1 || true
           grep -E '(system/|system_ext/|product/)' ${{ env.WORK_DIR }}/full_diff.txt | grep -v 'build\.prop' > ${{ env.WORK_DIR }}/filtered_diff.txt || true
           
-          echo "Generated all file lists and diffs"
+          echo "Filtered differences found: $(wc -l < ${{ env.WORK_DIR }}/filtered_diff.txt)"
 
       - name: Generate comparison report
         run: |
-          {
-            echo "# GSI Image Comparison: VANILLA vs GAPPS"
-            echo ""
-            echo "Release: ${{ steps.fetch.outputs.release_name }}"
-            echo "Tag: ${{ steps.fetch.outputs.release_tag }}"
-            echo "Source: ${{ steps.set_api.outputs.api_url }}"
-            echo "Comparison date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-            echo ""
-            echo "## Filtered differences (system/, system_ext/, product/ - no build.prop)"
-            echo '```diff'
-            cat ${{ env.WORK_DIR }}/filtered_diff.txt
-            echo '```'
-          } > ${{ env.WORK_DIR }}/comparison_report.md
+          CURRENT_DATE=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          
+          cat > ${{ env.WORK_DIR }}/comparison_report.md << EOF
+          # GSI Image Comparison: VANILLA vs GAPPS
+          
+          **Release:** ${{ steps.fetch.outputs.release_name }}
+          
+          **Tag:** ${{ steps.fetch.outputs.release_tag }}
+          
+          **Published:** ${{ steps.fetch.outputs.release_date }}
+          
+          **Source:** ${{ steps.set_api.outputs.api_url }}
+          
+          **Comparison date:** ${CURRENT_DATE}
+          
+          ---
+          
+          ## Filtered differences
+          
+          Filter: \`system/\`, \`system_ext/\`, \`product/\` - excluding \`build.prop\`
+          
+          \`\`\`diff
+          $(cat ${{ env.WORK_DIR }}/filtered_diff.txt)
+          \`\`\`
+          EOF
 
       - name: Generate gapps-to-vanilla recovery ZIP
         id: generate_zip
@@ -183,15 +216,14 @@ jobs:
           ZIP_DIR="${{ env.WORK_DIR }}/gapps_to_vanilla_zip"
           mkdir -p "$ZIP_DIR/system" "$ZIP_DIR/system_ext" "$ZIP_DIR/product"
           
-          # Files only in GAPPS (need to delete)
+          echo "Analyzing differences..."
+          
           comm -13 ${{ env.WORK_DIR }}/vanilla_files.txt ${{ env.WORK_DIR }}/gapps_files.txt | \
             grep -E '^(system/|system_ext/|product/)' | grep -v 'build\.prop' > ${{ env.WORK_DIR }}/gapps_only_files.txt
           
-          # Files only in VANILLA (need to restore)
           comm -23 ${{ env.WORK_DIR }}/vanilla_files.txt ${{ env.WORK_DIR }}/gapps_files.txt | \
             grep -E '^(system/|system_ext/|product/)' | grep -v 'build\.prop' > ${{ env.WORK_DIR }}/vanilla_only_files.txt
           
-          # Files that differ between versions
           grep "differ" ${{ env.WORK_DIR }}/full_diff.txt | \
             grep -E '(system/|system_ext/|product/)' | grep -v 'build\.prop' | \
             awk '{print $2}' | sed 's/^vanilla\///' > ${{ env.WORK_DIR }}/different_files.txt
@@ -219,7 +251,6 @@ jobs:
           done < ${{ env.WORK_DIR }}/different_files.txt
           echo "  Modified files: $DIFF_COUNT"
           
-          # Create delete list
           echo "Creating delete list..."
           while IFS= read -r file; do
             RELATIVE_PATH=$(echo "$file" | sed 's/^gapps\///')
@@ -228,25 +259,32 @@ jobs:
           DELETE_COUNT=$(wc -l < "$ZIP_DIR/delete.list")
           echo "  Files to delete: $DELETE_COUNT"
           
-          # Create META-INF directory and copy scripts from repository
+          echo "Creating recovery ZIP structure..."
           mkdir -p "$ZIP_DIR/META-INF/com/google/android"
           cp "${{ github.workspace }}/scripts/update-binary" "$ZIP_DIR/META-INF/com/google/android/update-binary"
           cp "${{ github.workspace }}/scripts/updater-script" "$ZIP_DIR/META-INF/com/google/android/updater-script"
           chmod +x "$ZIP_DIR/META-INF/com/google/android/update-binary"
           
-          # Get release tag and create ZIP
           RELEASE_TAG="${{ steps.fetch.outputs.release_tag }}"
           ZIP_NAME="gapps-to-vanilla-${RELEASE_TAG}.zip"
           
           cd "$ZIP_DIR"
           zip -r "${{ env.WORK_DIR }}/${ZIP_NAME}" . -x "*.git*"
           
+          ZIP_SIZE=$(du -h "${{ env.WORK_DIR }}/${ZIP_NAME}" | cut -f1)
+          
           echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
           echo "zip_path=${{ env.WORK_DIR }}/${ZIP_NAME}" >> $GITHUB_OUTPUT
+          echo "zip_size=$ZIP_SIZE" >> $GITHUB_OUTPUT
           
-          echo "Created recovery ZIP: ${ZIP_NAME}"
           echo ""
-          echo "ZIP contents summary:"
+          echo "========================================="
+          echo "Recovery ZIP created successfully!"
+          echo "========================================="
+          echo "File: ${ZIP_NAME}"
+          echo "Size: ${ZIP_SIZE}"
+          echo ""
+          echo "Contents summary:"
           echo "  AOSP files to restore: $((VANILLA_COUNT + DIFF_COUNT))"
           echo "  GAPPS files to delete: $DELETE_COUNT"
 
@@ -270,20 +308,28 @@ jobs:
       - name: Display summary
         run: |
           {
-            echo "## Comparison Complete"
+            echo "## GSI Comparison Complete"
             echo ""
-            echo "**Release:** ${{ steps.fetch.outputs.release_name }}"
-            echo "**Tag:** ${{ steps.fetch.outputs.release_tag }}"
-            echo "**Source:** ${{ steps.set_api.outputs.api_url }}"
+            echo "### Release Info"
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Release | ${{ steps.fetch.outputs.release_name }} |"
+            echo "| Tag | ${{ steps.fetch.outputs.release_tag }} |"
+            echo "| Published | ${{ steps.fetch.outputs.release_date }} |"
+            echo "| Source | ${{ steps.set_api.outputs.api_url }} |"
             echo ""
-            echo "### Artifacts"
+            echo "### Generated Artifacts"
             echo "| Artifact | Description |"
             echo "|----------|-------------|"
             echo "| comparison-report-${{ steps.fetch.outputs.release_tag }} | Full comparison report with filtered diff |"
-            echo "| ${{ steps.generate_zip.outputs.zip_name }} | Recovery-flashable ZIP to restore VANILLA |"
+            echo "| ${{ steps.generate_zip.outputs.zip_name }} | Recovery-flashable ZIP (${{ steps.generate_zip.outputs.zip_size }}) |"
             echo ""
-            echo "### Usage"
+            echo "### How to use"
             echo "1. Download ${{ steps.generate_zip.outputs.zip_name }}"
-            echo "2. Flash via TWRP/OrangeFox recovery"
-            echo "3. Reboot system"
+            echo "2. Boot into TWRP/OrangeFox recovery"
+            echo "3. Flash the ZIP"
+            echo "4. Wipe cache/dalvik (optional)"
+            echo "5. Reboot system"
+            echo ""
+            echo "The ZIP will remove GAPPS files and restore original AOSP files from VANILLA build."
           } >> $GITHUB_STEP_SUMMARY
