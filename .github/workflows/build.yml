@@ -133,20 +133,25 @@ jobs:
         run: |
           cd ${{ env.WORK_DIR }}/extracted
           
-          # Generate file lists
-          find vanilla -type f | sed 's|^vanilla/||' | sort > ${{ env.WORK_DIR }}/vanilla_files.txt
-          find gapps -type f | sed 's|^gapps/||' | sort > ${{ env.WORK_DIR }}/gapps_files.txt
-          
-          echo "VANILLA files: $(wc -l < ${{ env.WORK_DIR }}/vanilla_files.txt)"
-          echo "GAPPS files: $(wc -l < ${{ env.WORK_DIR }}/gapps_files.txt)"
-          
-          # Generate diff, filter out symlink noise
+          echo "Generating diff..."
           diff -qr vanilla gapps 2>&1 | \
-            grep -v 'No such file or directory' > ${{ env.WORK_DIR }}/full_diff.txt || true
+            grep -v 'No such file or directory' > ${{ env.WORK_DIR }}/full_diff_raw.txt || true
           
-          # Filter: only system/, system_ext/, product/ - exclude build.prop
-          grep -E '(system/|system_ext/|product/)' ${{ env.WORK_DIR }}/full_diff.txt | \
-            grep -v 'build\.prop' > ${{ env.WORK_DIR }}/filtered_diff.txt || true
+          # Clean up paths:
+          # 1. Remove "system/product/" -> "product/" (symlink duplicate)
+          # 2. Remove "system/system_ext/" -> "system_ext/" (symlink duplicate)
+          # 3. Keep only system/, system_ext/, product/
+          # 4. Exclude build.prop
+          cat ${{ env.WORK_DIR }}/full_diff_raw.txt | \
+            sed 's|system/product/|product/|g' | \
+            sed 's|system/system_ext/|system_ext/|g' | \
+            grep -E '(^Only in.*(system/|system_ext/|product/)|^Files.*(system/|system_ext/|product/))' | \
+            grep -v 'build\.prop' | \
+            sort -u > ${{ env.WORK_DIR }}/filtered_diff.txt || true
+          
+          # Create clean full diff
+          cat ${{ env.WORK_DIR }}/full_diff_raw.txt | \
+            grep -v '^diff:' | sort -u > ${{ env.WORK_DIR }}/full_diff.txt || true
           
           echo "Full diff lines: $(wc -l < ${{ env.WORK_DIR }}/full_diff.txt)"
           echo "Filtered diff lines: $(wc -l < ${{ env.WORK_DIR }}/filtered_diff.txt)"
@@ -184,6 +189,7 @@ jobs:
           cd ${{ env.WORK_DIR }}/extracted
           
           ZIP_DIR="${{ env.WORK_DIR }}/gapps_to_vanilla_zip"
+          rm -rf "$ZIP_DIR"
           mkdir -p "$ZIP_DIR"
           
           echo "=== PARSING FILTERED DIFF ==="
@@ -200,25 +206,36 @@ jobs:
           grep '^Files.*differ' ${{ env.WORK_DIR }}/filtered_diff.txt | \
             sed 's|^Files vanilla/||' | sed 's| and .* differ||' | sort -u > ${{ env.WORK_DIR }}/differ.txt
           
-          echo "To DELETE: $(wc -l < ${{ env.WORK_DIR }}/gapps_only.txt)"
-          echo "To RESTORE: $(wc -l < ${{ env.WORK_DIR }}/vanilla_only.txt)"
-          echo "To REPLACE: $(wc -l < ${{ env.WORK_DIR }}/differ.txt)"
+          echo "To DELETE (directories): $(wc -l < ${{ env.WORK_DIR }}/gapps_only.txt)"
+          cat ${{ env.WORK_DIR }}/gapps_only.txt
           
-          # COPY vanilla-only files (files that exist in VANILLA but not in GAPPS)
           echo ""
-          echo "=== COPYING VANILLA-ONLY FILES ==="
+          echo "To RESTORE (directories): $(wc -l < ${{ env.WORK_DIR }}/vanilla_only.txt)"
+          cat ${{ env.WORK_DIR }}/vanilla_only.txt
+          
+          echo ""
+          echo "To REPLACE (files): $(wc -l < ${{ env.WORK_DIR }}/differ.txt)"
+          cat ${{ env.WORK_DIR }}/differ.txt
+          
+          # RESTORE vanilla-only directories (copy ALL files from these directories)
+          echo ""
+          echo "=== COPYING VANILLA-ONLY DIRECTORIES ==="
           VANILLA_COUNT=0
-          while IFS= read -r file; do
-            if [[ -n "$file" && -f "vanilla/$file" ]]; then
-              TARGET_DIR="$ZIP_DIR/$(dirname "$file")"
+          while IFS= read -r dir; do
+            if [[ -n "$dir" && -d "vanilla/$dir" ]]; then
+              # Copy entire directory contents
+              TARGET_DIR="$ZIP_DIR/$dir"
               mkdir -p "$TARGET_DIR"
-              cp "vanilla/$file" "$ZIP_DIR/$file"
-              VANILLA_COUNT=$((VANILLA_COUNT + 1))
-              echo "  + $file"
+              cp -r "vanilla/$dir/"* "$TARGET_DIR/" 2>/dev/null || true
+              
+              # Count files copied
+              FILE_COUNT=$(find "$TARGET_DIR" -type f | wc -l)
+              VANILLA_COUNT=$((VANILLA_COUNT + FILE_COUNT))
+              echo "  + $dir/ ($FILE_COUNT files)"
             fi
           done < ${{ env.WORK_DIR }}/vanilla_only.txt
           
-          # COPY different files (replace GAPPS versions with VANILLA versions)
+          # REPLACE different files
           echo ""
           echo "=== COPYING DIFFERENT FILES ==="
           DIFF_COUNT=0
@@ -232,21 +249,22 @@ jobs:
             fi
           done < ${{ env.WORK_DIR }}/differ.txt
           
-          # CREATE delete list (files to remove from GAPPS installation)
+          # CREATE delete list (directories to remove)
           echo ""
           echo "=== CREATING DELETE LIST ==="
-          while IFS= read -r file; do
-            if [[ -n "$file" ]]; then
-              echo "/$file" >> "$ZIP_DIR/delete.list"
+          while IFS= read -r dir; do
+            if [[ -n "$dir" ]]; then
+              echo "/$dir" >> "$ZIP_DIR/delete.list"
             fi
           done < ${{ env.WORK_DIR }}/gapps_only.txt
           DELETE_COUNT=$(wc -l < "$ZIP_DIR/delete.list" 2>/dev/null || echo 0)
-          echo "Delete list: $DELETE_COUNT entries"
+          echo "Delete list: $DELETE_COUNT directories"
+          cat "$ZIP_DIR/delete.list"
           
           # Show ZIP structure
           echo ""
           echo "=== ZIP STRUCTURE ==="
-          find "$ZIP_DIR" -type f -not -path "*/META-INF/*" | head -30
+          find "$ZIP_DIR" -type f -not -path "*/META-INF/*" | head -50
           
           # META-INF
           mkdir -p "$ZIP_DIR/META-INF/com/google/android"
@@ -271,7 +289,7 @@ jobs:
           echo "========================================="
           echo "ZIP: ${ZIP_NAME} (${ZIP_SIZE})"
           echo "Restore: $((VANILLA_COUNT + DIFF_COUNT)) files"
-          echo "Delete: $DELETE_COUNT files"
+          echo "Delete: $DELETE_COUNT directories"
           echo "========================================="
 
       - name: Upload comparison artifacts
