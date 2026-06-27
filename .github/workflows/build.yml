@@ -60,7 +60,9 @@ jobs:
           
           if [[ -z "$TARGET_VERSION" ]]; then
             LATEST_RELEASE=$(jq -r '.[0]' "${{ env.WORK_DIR }}/releases.json")
+            echo "Using latest release"
           else
+            echo "Searching for version: $TARGET_VERSION"
             LATEST_RELEASE=$(jq --arg ver "$TARGET_VERSION" '
               map(select(.name | test($ver; "i"))) | 
               sort_by(.published_at) | 
@@ -69,11 +71,15 @@ jobs:
             ' "${{ env.WORK_DIR }}/releases.json")
             
             if [[ "$LATEST_RELEASE" == "null" || -z "$LATEST_RELEASE" ]]; then
-              echo "::error::Version $TARGET_VERSION not found"
+              echo "::error::Version $TARGET_VERSION not found in release names"
+              echo ""
               echo "Available releases:"
               jq -r '.[] | "\(.tag_name) - \(.name)"' "${{ env.WORK_DIR }}/releases.json"
               exit 1
             fi
+            
+            MATCH_COUNT=$(jq --arg ver "$TARGET_VERSION" '[.[] | select(.name | test($ver; "i"))] | length' "${{ env.WORK_DIR }}/releases.json")
+            echo "Found $MATCH_COUNT release(s) matching version $TARGET_VERSION, using latest"
           fi
           
           if [[ "$LATEST_RELEASE" == "null" ]]; then
@@ -93,6 +99,8 @@ jobs:
           
           if [[ -z "$VANILLA_URL" || -z "$GAPPS_URL" ]]; then
             echo "::error::Required assets not found"
+            echo "VANILLA: $VANILLA_URL"
+            echo "GAPPS: $GAPPS_URL"
             exit 1
           fi
           
@@ -100,22 +108,28 @@ jobs:
           echo "gapps_url=$GAPPS_URL" >> $GITHUB_OUTPUT
           
           echo "Selected: $RELEASE_NAME ($RELEASE_TAG)"
+          echo "Published: $RELEASE_DATE"
           
       - name: Download VANILLA
         run: |
           mkdir -p ${{ env.WORK_DIR }}/downloads
+          echo "Downloading VANILLA..."
           curl -fL --retry 5 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/vanilla.img.xz" \
             "${{ steps.fetch.outputs.vanilla_url }}"
+          echo "VANILLA downloaded"
           
       - name: Download GAPPS
         run: |
+          echo "Downloading GAPPS..."
           curl -fL --retry 5 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/gapps.img.xz" \
             "${{ steps.fetch.outputs.gapps_url }}"
+          echo "GAPPS downloaded"
           
       - name: Extract VANILLA
         run: |
           VANILLA_OUT="${{ env.WORK_DIR }}/extracted/vanilla"
           mkdir -p "$VANILLA_OUT"
+    
           xz -d "${{ env.WORK_DIR }}/downloads/vanilla.img.xz"
           set +e
           7z x "${{ env.WORK_DIR }}/downloads/vanilla.img" -o"$VANILLA_OUT"
@@ -130,6 +144,7 @@ jobs:
         run: |
           GAPPS_OUT="${{ env.WORK_DIR }}/extracted/gapps"
           mkdir -p "$GAPPS_OUT"
+    
           xz -d "${{ env.WORK_DIR }}/downloads/gapps.img.xz"
           set +e
           7z x "${{ env.WORK_DIR }}/downloads/gapps.img" -o"$GAPPS_OUT"
@@ -144,28 +159,28 @@ jobs:
         run: |
           cd ${{ env.WORK_DIR }}/extracted
           
-          # Follow symlinks to avoid duplicate paths, then sort unique
-          find -L vanilla -type f 2>/dev/null | sed 's|^vanilla/||' | sort -u > ${{ env.WORK_DIR }}/vanilla_files.txt
-          find -L gapps -type f 2>/dev/null | sed 's|^gapps/||' | sort -u > ${{ env.WORK_DIR }}/gapps_files.txt
+          # Create file lists
+          find vanilla -type f | sed 's|^vanilla/||' | sort > ${{ env.WORK_DIR }}/vanilla_files.txt
+          find gapps -type f | sed 's|^gapps/||' | sort > ${{ env.WORK_DIR }}/gapps_files.txt
+          find vanilla -type d | sed 's|^vanilla/||' | sort > ${{ env.WORK_DIR }}/vanilla_dirs.txt
+          find gapps -type d | sed 's|^gapps/||' | sort > ${{ env.WORK_DIR }}/gapps_dirs.txt
           
           echo "VANILLA files: $(wc -l < ${{ env.WORK_DIR }}/vanilla_files.txt)"
           echo "GAPPS files: $(wc -l < ${{ env.WORK_DIR }}/gapps_files.txt)"
           
-          # Generate full diff (recursive, brief)
-          diff -qr vanilla gapps 2>&1 | grep -v 'No such file or directory' > ${{ env.WORK_DIR }}/full_diff.txt || true
+          # Generate diff (exactly like first workflow)
+          diff -qr vanilla gapps > ${{ env.WORK_DIR }}/full_diff.txt 2>&1 || true
           
-          echo "Full diff lines: $(wc -l < ${{ env.WORK_DIR }}/full_diff.txt)"
-          echo "Only in gapps: $(grep -c '^Only in gapps' ${{ env.WORK_DIR }}/full_diff.txt || echo 0)"
-          echo "Only in vanilla: $(grep -c '^Only in vanilla' ${{ env.WORK_DIR }}/full_diff.txt || echo 0)"
-          echo "Differ: $(grep -c '^Files.*differ' ${{ env.WORK_DIR }}/full_diff.txt || echo 0)"
-          
-          # Filtered diff for report (exclude build.prop)
+          # Filtered diff - EXACTLY like first workflow
           grep -E '(system/|system_ext/|product/)' ${{ env.WORK_DIR }}/full_diff.txt | \
             grep -v 'build\.prop' > ${{ env.WORK_DIR }}/filtered_diff.txt || true
-            
+          
+          echo "Full diff lines: $(wc -l < ${{ env.WORK_DIR }}/full_diff.txt)"
+          echo "Filtered diff lines: $(wc -l < ${{ env.WORK_DIR }}/filtered_diff.txt)"
+          
           echo ""
-          echo "=== FULL DIFF (first 80 lines) ==="
-          head -80 ${{ env.WORK_DIR }}/full_diff.txt
+          echo "=== FILTERED DIFF ==="
+          cat ${{ env.WORK_DIR }}/filtered_diff.txt
 
       - name: Generate comparison report
         run: |
@@ -188,14 +203,6 @@ jobs:
           \`\`\`diff
           $(cat ${{ env.WORK_DIR }}/filtered_diff.txt)
           \`\`\`
-          
-          ---
-          
-          ## Complete diff
-          
-          \`\`\`diff
-          $(cat ${{ env.WORK_DIR }}/full_diff.txt)
-          \`\`\`
           EOF
 
       - name: Generate gapps-to-vanilla recovery ZIP
@@ -206,38 +213,34 @@ jobs:
           ZIP_DIR="${{ env.WORK_DIR }}/gapps_to_vanilla_zip"
           mkdir -p "$ZIP_DIR/system" "$ZIP_DIR/system_ext" "$ZIP_DIR/product"
           
-          echo "=== PARSING DIFF ==="
+          echo "=== PARSING FILTERED DIFF ==="
           
-          # Files only in GAPPS -> DELETE
-          grep '^Only in gapps' ${{ env.WORK_DIR }}/full_diff.txt | \
-            sed 's/^Only in gapps: //' | sed 's/: /\//' | \
-            grep -E '^(system/|system_ext/|product/)' | \
-            grep -v 'build\.prop' | sort -u > ${{ env.WORK_DIR }}/gapps_only_files.txt
-          echo "Files to DELETE: $(wc -l < ${{ env.WORK_DIR }}/gapps_only_files.txt)"
+          # Parse filtered diff to get file lists
+          # Only in gapps -> DELETE
+          grep '^Only in gapps' ${{ env.WORK_DIR }}/filtered_diff.txt | \
+            sed 's/^Only in gapps: //' | sed 's/: /\//' | sort -u > ${{ env.WORK_DIR }}/gapps_only.txt
           
-          # Files only in VANILLA -> RESTORE
-          grep '^Only in vanilla' ${{ env.WORK_DIR }}/full_diff.txt | \
-            sed 's/^Only in vanilla: //' | sed 's/: /\//' | \
-            grep -E '^(system/|system_ext/|product/)' | \
-            grep -v 'build\.prop' | sort -u > ${{ env.WORK_DIR }}/vanilla_only_files.txt
-          echo "Files to RESTORE (vanilla-only): $(wc -l < ${{ env.WORK_DIR }}/vanilla_only_files.txt)"
+          # Only in vanilla -> RESTORE
+          grep '^Only in vanilla' ${{ env.WORK_DIR }}/filtered_diff.txt | \
+            sed 's/^Only in vanilla: //' | sed 's/: /\//' | sort -u > ${{ env.WORK_DIR }}/vanilla_only.txt
           
-          # Files that DIFFER -> REPLACE
-          grep '^Files.*differ' ${{ env.WORK_DIR }}/full_diff.txt | \
-            sed 's/^Files vanilla\///' | sed 's/ and .* differ//' | \
-            grep -E '^(system/|system_ext/|product/)' | \
-            grep -v 'build\.prop' | sort -u > ${{ env.WORK_DIR }}/different_files.txt
-          echo "Files to REPLACE: $(wc -l < ${{ env.WORK_DIR }}/different_files.txt)"
+          # Files differ -> REPLACE
+          grep '^Files.*differ' ${{ env.WORK_DIR }}/filtered_diff.txt | \
+            sed 's/^Files vanilla\///' | sed 's/ and .* differ//' | sort -u > ${{ env.WORK_DIR }}/differ.txt
+          
+          echo "To DELETE: $(wc -l < ${{ env.WORK_DIR }}/gapps_only.txt) files"
+          echo "To RESTORE (vanilla-only): $(wc -l < ${{ env.WORK_DIR }}/vanilla_only.txt) files"
+          echo "To REPLACE: $(wc -l < ${{ env.WORK_DIR }}/differ.txt) files"
           
           echo ""
-          echo "=== FILES TO RESTORE ==="
-          cat ${{ env.WORK_DIR }}/vanilla_only_files.txt
+          echo "=== FILES TO RESTORE (vanilla-only) ==="
+          head -30 ${{ env.WORK_DIR }}/vanilla_only.txt
           echo ""
           echo "=== FILES TO REPLACE ==="
-          cat ${{ env.WORK_DIR }}/different_files.txt
+          head -30 ${{ env.WORK_DIR }}/differ.txt
           echo ""
           echo "=== FILES TO DELETE ==="
-          cat ${{ env.WORK_DIR }}/gapps_only_files.txt
+          head -30 ${{ env.WORK_DIR }}/gapps_only.txt
           
           # COPY vanilla-only files
           echo ""
@@ -249,9 +252,10 @@ jobs:
               mkdir -p "$TARGET_DIR"
               cp "vanilla/$file" "$ZIP_DIR/$file"
               VANILLA_COUNT=$((VANILLA_COUNT + 1))
+              echo "  + $file"
             fi
-          done < ${{ env.WORK_DIR }}/vanilla_only_files.txt
-          echo "Copied vanilla-only: $VANILLA_COUNT"
+          done < ${{ env.WORK_DIR }}/vanilla_only.txt
+          echo "Restored (vanilla-only): $VANILLA_COUNT"
           
           # COPY different files
           DIFF_COUNT=0
@@ -261,16 +265,17 @@ jobs:
               mkdir -p "$TARGET_DIR"
               cp "vanilla/$file" "$ZIP_DIR/$file"
               DIFF_COUNT=$((DIFF_COUNT + 1))
+              echo "  * $file"
             fi
-          done < ${{ env.WORK_DIR }}/different_files.txt
-          echo "Copied different: $DIFF_COUNT"
+          done < ${{ env.WORK_DIR }}/differ.txt
+          echo "Replaced: $DIFF_COUNT"
           
           # CREATE delete list
           while IFS= read -r file; do
             if [[ -n "$file" ]]; then
               echo "/$file" >> "$ZIP_DIR/delete.list"
             fi
-          done < ${{ env.WORK_DIR }}/gapps_only_files.txt
+          done < ${{ env.WORK_DIR }}/gapps_only.txt
           DELETE_COUNT=$(wc -l < "$ZIP_DIR/delete.list" 2>/dev/null || echo 0)
           echo "Delete list: $DELETE_COUNT"
           
