@@ -1,4 +1,4 @@
-name: RELEASE - Batch gapps-to-vanilla Generator
+name: release
 
 on:
   workflow_dispatch:
@@ -56,20 +56,22 @@ jobs:
           
           COUNT="${{ github.event.inputs.count }}"
           
-          echo "Selecting $COUNT unique versions..."
+          echo "Selecting $COUNT unique versions (newest first)..."
           
-          # Get UNIQUE releases by version number in name
-          # Example: "Infinity X 3.9 | A16 QPR2 | ..." -> version "3.9"
+          # Get UNIQUE releases by version number, sorted newest first
           RELEASES=$(jq -r --arg count "$COUNT" '
             [.[] | select(.assets | map(.name) | join(",") | test("VANILLA"; "i") and test("GAPPS"; "i"))] |
             sort_by(.published_at) | reverse |
             map({
               tag: .tag_name,
               name: .name,
+              date: .published_at,
               version: (.name | capture("(?<v>[0-9]+\\.[0-9]+)") | .v)
             }) |
+            sort_by(.version | split(".") | map(tonumber)) | reverse |
             unique_by(.version) |
             .[:($count|tonumber)] |
+            sort_by(.date) | reverse |
             .[].tag
           ' "${{ env.WORK_DIR }}/releases.json")
           
@@ -84,9 +86,8 @@ jobs:
           fi
           
           TOTAL=$(echo "$RELEASES" | wc -l)
-          echo "Selected $TOTAL unique releases:"
+          echo "Selected $TOTAL unique releases (newest first):"
           
-          # Show selected releases with versions
           while IFS= read -r tag; do
             VERSION=$(jq -r --arg tag "$tag" '.[] | select(.tag_name == $tag) | .name' "${{ env.WORK_DIR }}/releases.json")
             echo "  $tag - $VERSION"
@@ -96,6 +97,7 @@ jobs:
           echo "total_releases=$TOTAL" >> $GITHUB_OUTPUT
 
       - name: Process each release
+        id: process_releases
         run: |
           mkdir -p ${{ env.WORK_DIR }}/output
           PROCESSED=0
@@ -107,7 +109,6 @@ jobs:
             echo "Processing: $release_tag"
             echo "========================================="
             
-            # Get release info
             RELEASE_DATA=$(jq --arg tag "$release_tag" '.[] | select(.tag_name == $tag)' "${{ env.WORK_DIR }}/releases.json")
             
             RELEASE_NAME=$(echo "$RELEASE_DATA" | jq -r '.name')
@@ -122,13 +123,11 @@ jobs:
             
             echo "Release: $RELEASE_NAME"
             
-            # Download
             echo "  Downloading..."
             mkdir -p ${{ env.WORK_DIR }}/downloads/$release_tag
             curl -fL --retry 3 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/$release_tag/vanilla.img.xz" "$VANILLA_URL" 2>/dev/null
             curl -fL --retry 3 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/$release_tag/gapps.img.xz" "$GAPPS_URL" 2>/dev/null
             
-            # Extract
             echo "  Extracting VANILLA..."
             mkdir -p ${{ env.WORK_DIR }}/extracted/$release_tag/vanilla
             xz -d "${{ env.WORK_DIR }}/downloads/$release_tag/vanilla.img.xz" 2>/dev/null
@@ -143,7 +142,6 @@ jobs:
             7z x "${{ env.WORK_DIR }}/downloads/$release_tag/gapps.img" -o"${{ env.WORK_DIR }}/extracted/$release_tag/gapps" > /dev/null 2>&1
             set -e
             
-            # Generate diff
             echo "  Comparing images..."
             cd ${{ env.WORK_DIR }}/extracted/$release_tag
             diff -qr vanilla gapps 2>&1 | grep -v 'No such file or directory' > full_diff_raw.txt || true
@@ -157,7 +155,6 @@ jobs:
             DIFF_LINES=$(wc -l < filtered_diff.txt)
             echo "  Differences found: $DIFF_LINES lines"
             
-            # Parse diff
             grep '^Only in gapps' filtered_diff.txt | sed 's|^Only in gapps/||' | sed 's|: |/|' | sort -u > gapps_only.txt
             grep '^Only in vanilla' filtered_diff.txt | sed 's|^Only in vanilla/||' | sed 's|: |/|' | sort -u > vanilla_only.txt
             grep '^Files.*differ' filtered_diff.txt | sed 's|^Files vanilla/||' | sed 's| and .* differ||' | sort -u > differ.txt
@@ -168,12 +165,10 @@ jobs:
             
             echo "  To delete: $GAPPS_COUNT, To restore: $VANILLA_COUNT, To replace: $DIFFER_COUNT"
             
-            # Create ZIP
             ZIP_DIR="${{ env.WORK_DIR }}/zip_$release_tag"
             rm -rf "$ZIP_DIR"
             mkdir -p "$ZIP_DIR"
             
-            # Restore vanilla-only items
             while IFS= read -r item; do
               if [[ -n "$item" ]]; then
                 if [[ -f "vanilla/$item" ]]; then
@@ -186,7 +181,6 @@ jobs:
               fi
             done < vanilla_only.txt
             
-            # Replace different files
             while IFS= read -r file; do
               if [[ -n "$file" && -f "vanilla/$file" ]]; then
                 mkdir -p "$ZIP_DIR/$(dirname "$file")"
@@ -194,20 +188,17 @@ jobs:
               fi
             done < differ.txt
             
-            # Delete list
             while IFS= read -r item; do
               if [[ -n "$item" ]]; then
                 echo "/$item" >> "$ZIP_DIR/delete.list"
               fi
             done < gapps_only.txt
             
-            # META-INF
             mkdir -p "$ZIP_DIR/META-INF/com/google/android"
             cp "${{ github.workspace }}/scripts/update-binary" "$ZIP_DIR/META-INF/com/google/android/update-binary"
             cp "${{ github.workspace }}/scripts/updater-script" "$ZIP_DIR/META-INF/com/google/android/updater-script"
             chmod +x "$ZIP_DIR/META-INF/com/google/android/update-binary"
             
-            # Create ZIP
             ZIP_NAME="gapps-to-vanilla-${release_tag}.zip"
             cd "$ZIP_DIR"
             zip -r "${{ env.WORK_DIR }}/output/${ZIP_NAME}" . -x "*.git*" > /dev/null 2>&1
@@ -217,7 +208,6 @@ jobs:
             
             PROCESSED=$((PROCESSED + 1))
             
-            # Cleanup to save space
             rm -rf "${{ env.WORK_DIR }}/downloads/$release_tag"
             rm -rf "${{ env.WORK_DIR }}/extracted/$release_tag"
             rm -rf "$ZIP_DIR"
