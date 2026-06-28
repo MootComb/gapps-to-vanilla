@@ -1,4 +1,4 @@
-name: GSI Release Monitor
+name: build
 
 on:
   workflow_dispatch:
