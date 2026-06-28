@@ -43,35 +43,28 @@ ui_print " "
 
 log "Detecting partition layout..."
 
-# Check all possible mount points
 FOUND_SYSTEM=""
 FOUND_PRODUCT=""
 FOUND_SYSTEM_EXT=""
 SYSTEM_ROOT_MOUNT=""
 
-# Check /system_root first (OrangeFox, some TWRP)
+# Check all possible mount points
 if [ -d "/system_root/system" ] && [ -d "/system_root/system/app" ]; then
     FOUND_SYSTEM="/system_root/system"
     SYSTEM_ROOT_MOUNT="/system_root"
     log "  Found /system_root/system (system_root layout)"
-
-# Check /system (standard)
 elif [ -d "/system/app" ] || [ -d "/system/bin" ]; then
     FOUND_SYSTEM="/system"
     log "  Found /system (standard layout)"
-
-# Check if /system is symlink to /system_root/system
 elif [ -L "/system" ]; then
     REAL_SYSTEM=$(readlink -f /system)
     if [ -d "$REAL_SYSTEM/app" ]; then
         FOUND_SYSTEM="$REAL_SYSTEM"
         SYSTEM_ROOT_MOUNT=$(dirname "$REAL_SYSTEM")
         log "  /system is symlink to $REAL_SYSTEM"
-        log "  Using $FOUND_SYSTEM, root at $SYSTEM_ROOT_MOUNT"
     fi
 fi
 
-# Check /product
 if [ -d "/product/app" ] || [ -d "/product/bin" ]; then
     FOUND_PRODUCT="/product"
     log "  Found /product"
@@ -80,7 +73,6 @@ elif [ -L "/product" ]; then
     log "  /product is symlink to $FOUND_PRODUCT"
 fi
 
-# Check /system_ext
 if [ -d "/system_ext/app" ] || [ -d "/system_ext/bin" ]; then
     FOUND_SYSTEM_EXT="/system_ext"
     log "  Found /system_ext"
@@ -102,62 +94,120 @@ log "  SYSTEM_ROOT: $SYSTEM_ROOT_MOUNT"
 ui_print "Step 1/6: Mounting partitions"
 log "Step 1/6: Mounting partitions"
 
-# Function to mount partition as RW
+# Function to try ALL methods to mount RW
 mount_rw() {
     local mount_point="$1"
     local device=""
+    local fs_type=""
+    local method=""
     
-    # Find device for this mount point
+    # Find device
     device=$(mount | grep " $mount_point " | awk '{print $1}')
     
     if [ -z "$device" ]; then
-        # Try to find by mount point name
+        log "  No device found for $mount_point, trying path-based search"
         device=$(mount | grep "/$(basename $mount_point) " | awk '{print $1}')
     fi
     
-    if [ -n "$device" ]; then
-        log "  Device for $mount_point: $device"
-        
-        # Check filesystem type
-        FS_TYPE=$(mount | grep " $mount_point " | awk '{print $5}')
-        log "  Filesystem: $FS_TYPE"
-        
-        # Remount as RW
-        mount -o remount,rw $mount_point 2>/dev/null
-        if [ $? -eq 0 ]; then
-            log "  Remounted $mount_point as RW (remount)"
-        else
-            mount -o rw -t $FS_TYPE $device $mount_point 2>/dev/null
-            if [ $? -eq 0 ]; then
-                log "  Mounted $mount_point as RW (fresh mount)"
-            else
-                log "  WARNING: Failed to mount $mount_point as RW"
-            fi
-        fi
-    else
-        log "  No device found for $mount_point, trying direct remount"
-        mount -o remount,rw $mount_point 2>/dev/null || mount -o rw $mount_point 2>/dev/null
-    fi
-    
-    # Verify RW
-    if touch $mount_point/.test_rw 2>/dev/null; then
-        rm -f $mount_point/.test_rw
-        log "  [OK] $mount_point is now writable"
-        return 0
-    else
-        log "  [FAILED] $mount_point is still read-only"
+    if [ -z "$device" ]; then
+        log "  Cannot find device for $mount_point"
         return 1
     fi
+    
+    fs_type=$(mount | grep " $mount_point " | awk '{print $5}')
+    log "  Device: $device, FS: $fs_type"
+    
+    # Check if already RW
+    if mount | grep " $mount_point " | grep -q 'rw,'; then
+        log "  [OK] Already mounted RW"
+        return 0
+    fi
+    
+    log "  Attempting to remount as RW..."
+    
+    # Method 1: mount -o rw,remount DEVICE MOUNTPOINT (works for dm-verity in OrangeFox)
+    log "  Method 1: mount -o rw,remount $device $mount_point"
+    mount -o rw,remount $device $mount_point 2>/dev/null
+    if mount | grep " $mount_point " | grep -q 'rw,'; then
+        method="Method 1"
+        log "  [OK] $method: mount -o rw,remount device mountpoint"
+        return 0
+    fi
+    
+    # Method 2: mount -o remount,rw MOUNTPOINT (standard)
+    log "  Method 2: mount -o remount,rw $mount_point"
+    mount -o remount,rw $mount_point 2>/dev/null
+    if mount | grep " $mount_point " | grep -q 'rw,'; then
+        method="Method 2"
+        log "  [OK] $method: mount -o remount,rw"
+        return 0
+    fi
+    
+    # Method 3: toybox mount -o rw,remount DEVICE MOUNTPOINT
+    if command -v toybox > /dev/null 2>&1; then
+        log "  Method 3: toybox mount -o rw,remount $device $mount_point"
+        toybox mount -o rw,remount $device $mount_point 2>/dev/null
+        if mount | grep " $mount_point " | grep -q 'rw,'; then
+            method="Method 3"
+            log "  [OK] $method: toybox mount device mountpoint"
+            return 0
+        fi
+    fi
+    
+    # Method 4: toybox mount -o rw,remount MOUNTPOINT
+    if command -v toybox > /dev/null 2>&1; then
+        log "  Method 4: toybox mount -o rw,remount $mount_point"
+        toybox mount -o rw,remount $mount_point 2>/dev/null
+        if mount | grep " $mount_point " | grep -q 'rw,'; then
+            method="Method 4"
+            log "  [OK] $method: toybox mount -o rw,remount mountpoint"
+            return 0
+        fi
+    fi
+    
+    # Method 5: /sbin/mount -o rw,remount DEVICE MOUNTPOINT
+    if [ -x "/sbin/mount" ]; then
+        log "  Method 5: /sbin/mount -o rw,remount $device $mount_point"
+        /sbin/mount -o rw,remount $device $mount_point 2>/dev/null
+        if mount | grep " $mount_point " | grep -q 'rw,'; then
+            method="Method 5"
+            log "  [OK] $method: /sbin/mount device mountpoint"
+            return 0
+        fi
+    fi
+    
+    # Method 6: /sbin/mount -o rw,remount MOUNTPOINT
+    if [ -x "/sbin/mount" ]; then
+        log "  Method 6: /sbin/mount -o rw,remount $mount_point"
+        /sbin/mount -o rw,remount $mount_point 2>/dev/null
+        if mount | grep " $mount_point " | grep -q 'rw,'; then
+            method="Method 6"
+            log "  [OK] $method: /sbin/mount -o rw,remount mountpoint"
+            return 0
+        fi
+    fi
+    
+    # Method 7: mount -o rw -t FS_TYPE DEVICE MOUNTPOINT
+    log "  Method 7: mount -o rw -t $fs_type $device $mount_point"
+    mount -o rw -t $fs_type $device $mount_point 2>/dev/null
+    if mount | grep " $mount_point " | grep -q 'rw,'; then
+        method="Method 7"
+        log "  [OK] $method: mount -o rw -t fstype device mountpoint"
+        return 0
+    fi
+    
+    log "  [FAILED] All 7 methods failed for $mount_point"
+    return 1
 }
 
 # Mount system_root first if exists
 if [ -n "$SYSTEM_ROOT_MOUNT" ]; then
     ui_print "  -> $SYSTEM_ROOT_MOUNT (system root)"
     log "  Mounting system root: $SYSTEM_ROOT_MOUNT"
-    mount_rw "$SYSTEM_ROOT_MOUNT"
-    if [ $? -ne 0 ]; then
+    if ! mount_rw "$SYSTEM_ROOT_MOUNT"; then
         abort "Failed to mount $SYSTEM_ROOT_MOUNT as RW"
     fi
+    ui_print "    [OK] $SYSTEM_ROOT_MOUNT writable"
 fi
 
 # Mount all partitions
@@ -168,6 +218,7 @@ for point in "$FOUND_SYSTEM" "$FOUND_PRODUCT" "$FOUND_SYSTEM_EXT"; do
         if ! mount_rw "$point"; then
             abort "Failed to mount $point as RW"
         fi
+        ui_print "    [OK] $point writable"
     fi
 done
 
@@ -183,7 +234,7 @@ for point in "$FOUND_SYSTEM" "$FOUND_PRODUCT" "$FOUND_SYSTEM_EXT"; do
             ui_print "  -> $point: ${FREE}KB free"
             log "  $point: ${FREE}KB free"
             if [ "$FREE" -lt 51200 ] 2>/dev/null; then
-                ui_print "    WARNING: Low space on $point"
+                ui_print "    WARNING: Low space"
                 log "    WARNING: Low space"
             fi
         fi
@@ -217,51 +268,38 @@ log "Step 4/6: Removing GAPPS files"
 ui_print " "
 ui_print "Step 4/6: Removing GAPPS files"
 
-# Function to find and delete a file/directory
+# Function to find and delete a file/directory trying ALL possible paths
 delete_item() {
     local target="$1"
     local found=0
     
-    # List of possible base paths to search
-    local bases="$FOUND_SYSTEM $FOUND_PRODUCT $FOUND_SYSTEM_EXT $SYSTEM_ROOT_MOUNT /system /system_root"
+    # All possible base paths
+    local bases="$FOUND_SYSTEM $FOUND_PRODUCT $FOUND_SYSTEM_EXT $SYSTEM_ROOT_MOUNT /system /system_root /"
     
     for base in $bases; do
-        if [ -z "$base" ]; then
-            continue
-        fi
+        [ -z "$base" ] && continue
+        [ "$base" = "/" ] && continue
         
-        # Remove leading slash from target for path joining
         local clean_target="${target#/}"
         
-        # Try different path combinations
-        local paths_to_try="$base/$clean_target"
-        
-        # If target starts with /product, try replacing with system/product
-        if echo "$target" | grep -q '^/product/'; then
-            local sub_path="${target#/product/}"
-            paths_to_try="$paths_to_try $base/product/$sub_path"
-        fi
-        
-        # If target starts with /system_ext, try replacing with system/system_ext
-        if echo "$target" | grep -q '^/system_ext/'; then
-            local sub_path="${target#/system_ext/}"
-            paths_to_try="$paths_to_try $base/system_ext/$sub_path"
-        fi
-        
-        # If target starts with /system/, try without system prefix
-        if echo "$target" | grep -q '^/system/'; then
-            local sub_path="${target#/system/}"
-            paths_to_try="$paths_to_try $base/$sub_path"
-        fi
-        
-        for full_path in $paths_to_try; do
+        # Build all possible full paths
+        for full_path in \
+            "$base/$clean_target" \
+            "$base/system/$clean_target" \
+            "${base}${target}"
+        do
+            # Skip if path contains double slashes
+            full_path=$(echo "$full_path" | sed 's|//|/|g')
+            
             if [ -d "$full_path" ]; then
+                log "  Trying to delete directory: $full_path"
                 rm -rf "$full_path"
                 if [ ! -d "$full_path" ]; then
                     log "  [DELETED] $full_path/ (directory)"
                     return 2
                 fi
             elif [ -f "$full_path" ]; then
+                log "  Trying to delete file: $full_path"
                 rm -f "$full_path"
                 if [ ! -f "$full_path" ]; then
                     log "  [DELETED] $full_path"
@@ -271,7 +309,6 @@ delete_item() {
         done
     done
     
-    log "  [NOT FOUND] $target (searched in: $bases)"
     return 0
 }
 
@@ -347,9 +384,6 @@ for dir in system system_ext product; do
             log "  Skipping $dir: no mount point"
             continue
         fi
-        
-        RESTORED=0
-        FAILED=0
         
         log "  -> Restoring $dir to $MOUNT_POINT..."
         ui_print "  -> Restoring $dir..."
