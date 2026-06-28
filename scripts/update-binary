@@ -116,23 +116,6 @@ for dir in system system_ext product; do
 done
 
 ui_print " "
-ui_print "Step 7/9: Setting permissions"
-for dir in $SYSTEM_MOUNT $SYSTEM_EXT_MOUNT $PRODUCT_MOUNT; do
-    find $dir -type d -exec chmod 755 {} \; 2>/dev/null
-    find $dir -type f -exec chmod 644 {} \; 2>/dev/null
-done
-ui_print "  Permissions set (755 dirs, 644 files)"
-
-ui_print " "
-ui_print "Step 8/9: Restoring SELinux contexts"
-for dir in $SYSTEM_MOUNT $SYSTEM_EXT_MOUNT $PRODUCT_MOUNT; do
-    if command -v restorecon > /dev/null 2>&1; then
-        restorecon -R $dir 2>/dev/null
-    fi
-done
-ui_print "  SELinux contexts restored"
-
-ui_print " "
 ui_print "Step 9/9: Cleanup"
 rm -rf /tmp/gapps_to_vanilla /tmp/delete.list
 for part in system system_ext product; do
