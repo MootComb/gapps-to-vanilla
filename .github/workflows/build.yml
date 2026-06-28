@@ -207,16 +207,12 @@ jobs:
                 mkdir -p "$TARGET_DIR"
                 cp "vanilla/$item" "$ZIP_DIR/$item"
                 VANILLA_COUNT=$((VANILLA_COUNT + 1))
-                echo "  + [FILE] $item"
               elif [[ -d "vanilla/$item" ]]; then
                 TARGET_DIR="$ZIP_DIR/$item"
                 mkdir -p "$TARGET_DIR"
                 cp -r "vanilla/$item/"* "$TARGET_DIR/" 2>/dev/null || true
                 FILE_COUNT=$(find "$TARGET_DIR" -type f | wc -l)
                 VANILLA_COUNT=$((VANILLA_COUNT + FILE_COUNT))
-                echo "  + [DIR]  $item/ ($FILE_COUNT files)"
-              else
-                echo "  ! NOT FOUND: $item"
               fi
             fi
           done < ${{ env.WORK_DIR }}/vanilla_only.txt
@@ -230,9 +226,6 @@ jobs:
               mkdir -p "$TARGET_DIR"
               cp "vanilla/$file" "$ZIP_DIR/$file"
               DIFF_COUNT=$((DIFF_COUNT + 1))
-              echo "  * $file"
-            else
-              echo "  ! NOT FOUND: $file"
             fi
           done < ${{ env.WORK_DIR }}/differ.txt
           
@@ -244,15 +237,22 @@ jobs:
             fi
           done < ${{ env.WORK_DIR }}/gapps_only.txt
           DELETE_COUNT=$(wc -l < "$ZIP_DIR/delete.list" 2>/dev/null || echo 0)
-          echo "Delete list: $DELETE_COUNT entries"
           
           mkdir -p "$ZIP_DIR/META-INF/com/google/android"
           cp "${{ github.workspace }}/scripts/update-binary" "$ZIP_DIR/META-INF/com/google/android/update-binary"
           cp "${{ github.workspace }}/scripts/updater-script" "$ZIP_DIR/META-INF/com/google/android/updater-script"
           chmod +x "$ZIP_DIR/META-INF/com/google/android/update-binary"
           
+          RELEASE_NAME="${{ steps.fetch.outputs.release_name }}"
           RELEASE_TAG="${{ steps.fetch.outputs.release_tag }}"
-          ZIP_NAME="gapps-to-vanilla-${RELEASE_TAG}.zip"
+          VERSION_NUM=$(echo "$RELEASE_NAME" | grep -oP '[0-9]+\.[0-9]+' | head -1)
+          
+          if [[ -n "$VERSION_NUM" ]]; then
+            ZIP_NAME="gapps-to-vanilla_infinityX-${VERSION_NUM}.zip"
+          else
+            ZIP_NAME="gapps-to-vanilla-${RELEASE_TAG}.zip"
+          fi
+          
           TOTAL_RESTORE=$((VANILLA_COUNT + DIFF_COUNT))
           
           cd "$ZIP_DIR"
