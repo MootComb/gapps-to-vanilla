@@ -1,31 +1,34 @@
-name: build
+name: release
 
 on:
   workflow_dispatch:
     inputs:
-      release_version:
-        description: 'Release version (e.g., 3.9, leave empty for latest)'
-        required: false
-        type: string
-        default: ''
       source_api_url:
         description: 'GitHub API URL for releases (leave empty for default)'
         required: false
         type: string
         default: ''
-  schedule:
-    - cron: '0 */6 * * *'
+      count:
+        description: 'Number of unique versions to process (default: 5)'
+        required: false
+        type: string
+        default: '5'
+      create_release:
+        description: 'Create GitHub Release with all ZIPs?'
+        required: false
+        type: boolean
+        default: true
 
 env:
   DEFAULT_API_URL: "https://api.github.com/repos/Doze-off/ProjectInfinity-X_gsi/releases"
   WORK_DIR: ${{ github.workspace }}/gsi_work
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  check_and_compare:
-    name: Check release and compare images
+  batch_generate:
+    name: Generate ZIPs for unique versions
     runs-on: ubuntu-latest
     
     steps:
@@ -50,268 +53,245 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xz-utils p7zip-full jq curl zip
 
-      - name: Fetch releases
-        id: fetch
+      - name: Fetch all releases and select unique versions
+        id: fetch_all
         run: |
           mkdir -p ${{ env.WORK_DIR }}
           curl -fsSL "${{ steps.set_api.outputs.api_url }}" -o "${{ env.WORK_DIR }}/releases.json"
           
-          TARGET_VERSION="${{ github.event.inputs.release_version }}"
+          COUNT="${{ github.event.inputs.count }}"
           
-          if [[ -z "$TARGET_VERSION" ]]; then
-            LATEST_RELEASE=$(jq -r '.[0]' "${{ env.WORK_DIR }}/releases.json")
-          else
-            LATEST_RELEASE=$(jq --arg ver "$TARGET_VERSION" '
-              map(select(.name | test($ver; "i"))) | 
-              sort_by(.published_at) | 
-              reverse | 
-              .[0]
+          echo "Selecting $COUNT unique versions (newest first)..."
+          
+          RELEASES=$(jq -r --arg count "$COUNT" '
+            [.[] | select(.assets | map(.name) | join(",") | test("VANILLA"; "i") and test("GAPPS"; "i"))] |
+            map({
+              tag: .tag_name,
+              name: .name,
+              date: .published_at,
+              version: (.name | capture("(?<v>[0-9]+\\.[0-9]+)") | .v // "0.0")
+            }) |
+            map(select(.version != null and .version != "0.0")) |
+            group_by(.version) |
+            map(sort_by(.date) | reverse | .[0]) |
+            sort_by(.version | split(".") | map(tonumber? // 0)) | reverse |
+            .[:($count|tonumber)] |
+            .[].tag
+          ' "${{ env.WORK_DIR }}/releases.json")
+          
+          if [[ -z "$RELEASES" ]]; then
+            echo "Version extraction failed, falling back to latest $COUNT releases"
+            RELEASES=$(jq -r --arg count "$COUNT" '
+              [.[] | select(.assets | map(.name) | join(",") | test("VANILLA"; "i") and test("GAPPS"; "i"))] |
+              sort_by(.published_at) | reverse |
+              .[:($count|tonumber)] |
+              .[].tag_name
             ' "${{ env.WORK_DIR }}/releases.json")
+          fi
+          
+          TOTAL=$(echo "$RELEASES" | wc -l)
+          echo "Selected $TOTAL unique releases (newest first):"
+          
+          while IFS= read -r tag; do
+            VERSION=$(jq -r --arg tag "$tag" '.[] | select(.tag_name == $tag) | .name' "${{ env.WORK_DIR }}/releases.json")
+            echo "  $tag - $VERSION"
+          done <<< "$RELEASES"
+          
+          echo "$RELEASES" > ${{ env.WORK_DIR }}/release_list.txt
+          echo "total_releases=$TOTAL" >> $GITHUB_OUTPUT
+
+      - name: Process each release
+        id: process_releases
+        run: |
+          mkdir -p ${{ env.WORK_DIR }}/output
+          rm -f ${{ env.WORK_DIR }}/output/*.zip
+          
+          PROCESSED=0
+          SKIPPED=0
+          ZIP_LIST=""
+          
+          while IFS= read -r release_tag; do
+            echo ""
+            echo "========================================="
+            echo "[$((PROCESSED + 1))] Processing: $release_tag"
+            echo "========================================="
             
-            if [[ "$LATEST_RELEASE" == "null" || -z "$LATEST_RELEASE" ]]; then
-              echo "::error::Version $TARGET_VERSION not found"
-              jq -r '.[] | "\(.tag_name) - \(.name)"' "${{ env.WORK_DIR }}/releases.json"
-              exit 1
+            RELEASE_DATA=$(jq --arg tag "$release_tag" '.[] | select(.tag_name == $tag)' "${{ env.WORK_DIR }}/releases.json")
+            
+            RELEASE_NAME=$(echo "$RELEASE_DATA" | jq -r '.name')
+            VANILLA_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("VANILLA"; "i")) | .browser_download_url' | head -1)
+            GAPPS_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("GAPPS"; "i")) | .browser_download_url' | head -1)
+            
+            if [[ -z "$VANILLA_URL" || -z "$GAPPS_URL" ]]; then
+              echo "SKIP: $release_tag - missing VANILLA or GAPPS assets"
+              SKIPPED=$((SKIPPED + 1))
+              continue
             fi
-          fi
-          
-          RELEASE_TAG=$(echo "$LATEST_RELEASE" | jq -r '.tag_name')
-          RELEASE_NAME=$(echo "$LATEST_RELEASE" | jq -r '.name')
-          RELEASE_DATE=$(echo "$LATEST_RELEASE" | jq -r '.published_at')
-          echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
-          echo "release_name=$RELEASE_NAME" >> $GITHUB_OUTPUT
-          echo "release_date=$RELEASE_DATE" >> $GITHUB_OUTPUT
-          
-          VANILLA_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | test("VANILLA"; "i")) | .browser_download_url' | head -1)
-          GAPPS_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | test("GAPPS"; "i")) | .browser_download_url' | head -1)
-          
-          echo "vanilla_url=$VANILLA_URL" >> $GITHUB_OUTPUT
-          echo "gapps_url=$GAPPS_URL" >> $GITHUB_OUTPUT
-          
-          echo "Selected: $RELEASE_NAME ($RELEASE_TAG)"
-          
-      - name: Download VANILLA
-        run: |
-          mkdir -p ${{ env.WORK_DIR }}/downloads
-          curl -fL --retry 5 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/vanilla.img.xz" \
-            "${{ steps.fetch.outputs.vanilla_url }}"
-          
-      - name: Download GAPPS
-        run: |
-          curl -fL --retry 5 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/gapps.img.xz" \
-            "${{ steps.fetch.outputs.gapps_url }}"
-          
-      - name: Extract VANILLA
-        run: |
-          VANILLA_OUT="${{ env.WORK_DIR }}/extracted/vanilla"
-          mkdir -p "$VANILLA_OUT"
-          xz -d "${{ env.WORK_DIR }}/downloads/vanilla.img.xz"
-          set +e
-          7z x "${{ env.WORK_DIR }}/downloads/vanilla.img" -o"$VANILLA_OUT"
-          EXIT_CODE=$?
-          set -e
-          if [ $EXIT_CODE -ne 0 ] && [ $EXIT_CODE -ne 2 ]; then
-            exit $EXIT_CODE
-          fi
-          echo "VANILLA_EXTRACTED=$VANILLA_OUT" >> $GITHUB_ENV
-
-      - name: Extract GAPPS
-        run: |
-          GAPPS_OUT="${{ env.WORK_DIR }}/extracted/gapps"
-          mkdir -p "$GAPPS_OUT"
-          xz -d "${{ env.WORK_DIR }}/downloads/gapps.img.xz"
-          set +e
-          7z x "${{ env.WORK_DIR }}/downloads/gapps.img" -o"$GAPPS_OUT"
-          EXIT_CODE=$?
-          set -e
-          if [ $EXIT_CODE -ne 0 ] && [ $EXIT_CODE -ne 2 ]; then
-            exit $EXIT_CODE
-          fi
-          echo "GAPPS_EXTRACTED=$GAPPS_OUT" >> $GITHUB_ENV
-
-      - name: Generate file lists and diff
-        run: |
-          cd ${{ env.WORK_DIR }}/extracted
-          
-          diff -qr vanilla gapps 2>&1 | \
-            grep -v 'No such file or directory' > ${{ env.WORK_DIR }}/full_diff_raw.txt || true
-          
-          cat ${{ env.WORK_DIR }}/full_diff_raw.txt | \
-            sed 's|system/product/|product/|g' | \
-            sed 's|system/system_ext/|system_ext/|g' | \
-            grep -E '(^Only in.*(system/|system_ext/|product/)|^Files.*(system/|system_ext/|product/))' | \
-            grep -v 'build\.prop' | \
-            sort -u > ${{ env.WORK_DIR }}/filtered_diff.txt || true
-          
-          cat ${{ env.WORK_DIR }}/full_diff_raw.txt | \
-            grep -v '^diff:' | sort -u > ${{ env.WORK_DIR }}/full_diff.txt || true
-          
-          echo "Filtered diff: $(wc -l < ${{ env.WORK_DIR }}/filtered_diff.txt) lines"
-
-      - name: Generate comparison report
-        run: |
-          CURRENT_DATE=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
-          
-          echo "# GSI Image Comparison: VANILLA vs GAPPS" > ${{ env.WORK_DIR }}/comparison_report.md
-          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "**Release:** ${{ steps.fetch.outputs.release_name }}" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "**Tag:** ${{ steps.fetch.outputs.release_tag }}" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "**Published:** ${{ steps.fetch.outputs.release_date }}" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "**Comparison date:** ${CURRENT_DATE}" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "---" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "## Filtered structural differences" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "Filter: Only \`system/\`, \`system_ext/\`, \`product/\` - excluding \`build.prop\`" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo '```diff' >> ${{ env.WORK_DIR }}/comparison_report.md
-          cat ${{ env.WORK_DIR }}/filtered_diff.txt >> ${{ env.WORK_DIR }}/comparison_report.md
-          echo '```' >> ${{ env.WORK_DIR }}/comparison_report.md
-
-      - name: Generate gapps-to-vanilla recovery ZIP
-        id: generate_zip
-        run: |
-          cd ${{ env.WORK_DIR }}/extracted
-          
-          ZIP_DIR="${{ env.WORK_DIR }}/gapps_to_vanilla_zip"
-          rm -rf "$ZIP_DIR"
-          mkdir -p "$ZIP_DIR"
-          
-          echo "=== PARSING FILTERED DIFF ==="
-          
-          grep '^Only in gapps' ${{ env.WORK_DIR }}/filtered_diff.txt | \
-            sed 's|^Only in gapps/||' | sed 's|: |/|' | sort -u > ${{ env.WORK_DIR }}/gapps_only.txt
-          
-          grep '^Only in vanilla' ${{ env.WORK_DIR }}/filtered_diff.txt | \
-            sed 's|^Only in vanilla/||' | sed 's|: |/|' | sort -u > ${{ env.WORK_DIR }}/vanilla_only.txt
-          
-          grep '^Files.*differ' ${{ env.WORK_DIR }}/filtered_diff.txt | \
-            sed 's|^Files vanilla/||' | sed 's| and .* differ||' | sort -u > ${{ env.WORK_DIR }}/differ.txt
-          
-          GAPPS_ONLY_COUNT=$(wc -l < ${{ env.WORK_DIR }}/gapps_only.txt)
-          VANILLA_ONLY_COUNT=$(wc -l < ${{ env.WORK_DIR }}/vanilla_only.txt)
-          DIFFER_COUNT=$(wc -l < ${{ env.WORK_DIR }}/differ.txt)
-          
-          echo "To DELETE: $GAPPS_ONLY_COUNT items"
-          echo "To RESTORE: $VANILLA_ONLY_COUNT items"
-          echo "To REPLACE: $DIFFER_COUNT items"
-          
-          echo ""
-          echo "=== RESTORING VANILLA-ONLY ITEMS ==="
-          VANILLA_COUNT=0
-          while IFS= read -r item; do
-            if [[ -n "$item" ]]; then
-              if [[ -f "vanilla/$item" ]]; then
-                TARGET_DIR="$ZIP_DIR/$(dirname "$item")"
-                mkdir -p "$TARGET_DIR"
-                cp "vanilla/$item" "$ZIP_DIR/$item"
-                VANILLA_COUNT=$((VANILLA_COUNT + 1))
-                echo "  + [FILE] $item"
-              elif [[ -d "vanilla/$item" ]]; then
-                TARGET_DIR="$ZIP_DIR/$item"
-                mkdir -p "$TARGET_DIR"
-                cp -r "vanilla/$item/"* "$TARGET_DIR/" 2>/dev/null || true
-                FILE_COUNT=$(find "$TARGET_DIR" -type f | wc -l)
-                VANILLA_COUNT=$((VANILLA_COUNT + FILE_COUNT))
-                echo "  + [DIR]  $item/ ($FILE_COUNT files)"
-              else
-                echo "  ! NOT FOUND: $item"
+            
+            VERSION_NUM=$(echo "$RELEASE_NAME" | grep -oP '[0-9]+\.[0-9]+' | head -1)
+            RELEASE_DATE=$(echo "$RELEASE_DATA" | jq -r '.published_at' | cut -d'T' -f1)
+            echo "Release: $RELEASE_NAME (v$VERSION_NUM, $RELEASE_DATE)"
+            
+            echo "  Downloading..."
+            mkdir -p ${{ env.WORK_DIR }}/downloads/$release_tag
+            curl -fL --retry 3 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/$release_tag/vanilla.img.xz" "$VANILLA_URL" 2>/dev/null
+            curl -fL --retry 3 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/$release_tag/gapps.img.xz" "$GAPPS_URL" 2>/dev/null
+            
+            echo "  Extracting..."
+            mkdir -p ${{ env.WORK_DIR }}/extracted/$release_tag/vanilla
+            mkdir -p ${{ env.WORK_DIR }}/extracted/$release_tag/gapps
+            
+            xz -d "${{ env.WORK_DIR }}/downloads/$release_tag/vanilla.img.xz" 2>/dev/null
+            set +e
+            7z x "${{ env.WORK_DIR }}/downloads/$release_tag/vanilla.img" -o"${{ env.WORK_DIR }}/extracted/$release_tag/vanilla" > /dev/null 2>&1
+            set -e
+            
+            xz -d "${{ env.WORK_DIR }}/downloads/$release_tag/gapps.img.xz" 2>/dev/null
+            set +e
+            7z x "${{ env.WORK_DIR }}/downloads/$release_tag/gapps.img" -o"${{ env.WORK_DIR }}/extracted/$release_tag/gapps" > /dev/null 2>&1
+            set -e
+            
+            echo "  Comparing..."
+            cd ${{ env.WORK_DIR }}/extracted/$release_tag
+            diff -qr vanilla gapps 2>&1 | grep -v 'No such file or directory' > full_diff_raw.txt || true
+            
+            cat full_diff_raw.txt | \
+              sed 's|system/product/|product/|g' | \
+              sed 's|system/system_ext/|system_ext/|g' | \
+              grep -E '(^Only in.*(system/|system_ext/|product/)|^Files.*(system/|system_ext/|product/))' | \
+              grep -v 'build\.prop' | sort -u > filtered_diff.txt || true
+            
+            grep '^Only in gapps' filtered_diff.txt | sed 's|^Only in gapps/||' | sed 's|: |/|' | sort -u > gapps_only.txt
+            grep '^Only in vanilla' filtered_diff.txt | sed 's|^Only in vanilla/||' | sed 's|: |/|' | sort -u > vanilla_only.txt
+            grep '^Files.*differ' filtered_diff.txt | sed 's|^Files vanilla/||' | sed 's| and .* differ||' | sort -u > differ.txt
+            
+            GAPPS_COUNT=$(wc -l < gapps_only.txt)
+            VANILLA_COUNT=$(wc -l < vanilla_only.txt)
+            DIFFER_COUNT=$(wc -l < differ.txt)
+            
+            echo "  Delete: $GAPPS_COUNT, Restore: $VANILLA_COUNT, Replace: $DIFFER_COUNT"
+            
+            ZIP_DIR="${{ env.WORK_DIR }}/zip_$release_tag"
+            rm -rf "$ZIP_DIR"
+            mkdir -p "$ZIP_DIR"
+            
+            while IFS= read -r item; do
+              if [[ -n "$item" ]]; then
+                if [[ -f "vanilla/$item" ]]; then
+                  mkdir -p "$ZIP_DIR/$(dirname "$item")"
+                  cp "vanilla/$item" "$ZIP_DIR/$item"
+                elif [[ -d "vanilla/$item" ]]; then
+                  mkdir -p "$ZIP_DIR/$item"
+                  cp -r "vanilla/$item/"* "$ZIP_DIR/$item/" 2>/dev/null || true
+                fi
               fi
-            fi
-          done < ${{ env.WORK_DIR }}/vanilla_only.txt
-          
-          echo ""
-          echo "=== REPLACING DIFFERENT FILES ==="
-          DIFF_COUNT=0
-          while IFS= read -r file; do
-            if [[ -n "$file" && -f "vanilla/$file" ]]; then
-              TARGET_DIR="$ZIP_DIR/$(dirname "$file")"
-              mkdir -p "$TARGET_DIR"
-              cp "vanilla/$file" "$ZIP_DIR/$file"
-              DIFF_COUNT=$((DIFF_COUNT + 1))
-              echo "  * $file"
+            done < vanilla_only.txt
+            
+            while IFS= read -r file; do
+              if [[ -n "$file" && -f "vanilla/$file" ]]; then
+                mkdir -p "$ZIP_DIR/$(dirname "$file")"
+                cp "vanilla/$file" "$ZIP_DIR/$file"
+              fi
+            done < differ.txt
+            
+            while IFS= read -r item; do
+              if [[ -n "$item" ]]; then
+                echo "/$item" >> "$ZIP_DIR/delete.list"
+              fi
+            done < gapps_only.txt
+            
+            mkdir -p "$ZIP_DIR/META-INF/com/google/android"
+            cp "${{ github.workspace }}/scripts/update-binary" "$ZIP_DIR/META-INF/com/google/android/update-binary"
+            cp "${{ github.workspace }}/scripts/updater-script" "$ZIP_DIR/META-INF/com/google/android/updater-script"
+            chmod +x "$ZIP_DIR/META-INF/com/google/android/update-binary"
+            
+            if [[ -n "$VERSION_NUM" ]]; then
+              ZIP_NAME="gapps-to-vanilla_infinityX-${VERSION_NUM}.zip"
             else
-              echo "  ! NOT FOUND: $file"
+              ZIP_NAME="gapps-to-vanilla-${release_tag}.zip"
             fi
-          done < ${{ env.WORK_DIR }}/differ.txt
-          
-          echo ""
-          echo "=== CREATING DELETE LIST ==="
-          while IFS= read -r item; do
-            if [[ -n "$item" ]]; then
-              echo "/$item" >> "$ZIP_DIR/delete.list"
-            fi
-          done < ${{ env.WORK_DIR }}/gapps_only.txt
-          DELETE_COUNT=$(wc -l < "$ZIP_DIR/delete.list" 2>/dev/null || echo 0)
-          echo "Delete list: $DELETE_COUNT entries"
-          
-          mkdir -p "$ZIP_DIR/META-INF/com/google/android"
-          cp "${{ github.workspace }}/scripts/update-binary" "$ZIP_DIR/META-INF/com/google/android/update-binary"
-          cp "${{ github.workspace }}/scripts/updater-script" "$ZIP_DIR/META-INF/com/google/android/updater-script"
-          chmod +x "$ZIP_DIR/META-INF/com/google/android/update-binary"
-          
-          RELEASE_TAG="${{ steps.fetch.outputs.release_tag }}"
-          ZIP_NAME="gapps-to-vanilla-${RELEASE_TAG}.zip"
-          TOTAL_RESTORE=$((VANILLA_COUNT + DIFF_COUNT))
-          
-          cd "$ZIP_DIR"
-          zip -r "${{ env.WORK_DIR }}/${ZIP_NAME}" . -x "*.git*"
-          
-          ZIP_SIZE=$(du -h "${{ env.WORK_DIR }}/${ZIP_NAME}" | cut -f1)
-          
-          echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
-          echo "zip_path=${{ env.WORK_DIR }}/${ZIP_NAME}" >> $GITHUB_OUTPUT
-          echo "zip_size=$ZIP_SIZE" >> $GITHUB_OUTPUT
-          echo "total_restore=$TOTAL_RESTORE" >> $GITHUB_OUTPUT
-          echo "delete_count=$DELETE_COUNT" >> $GITHUB_OUTPUT
+            
+            cd "$ZIP_DIR"
+            zip -r "${{ env.WORK_DIR }}/output/${ZIP_NAME}" . -x "*.git*" > /dev/null 2>&1
+            
+            ZIP_SIZE=$(du -h "${{ env.WORK_DIR }}/output/${ZIP_NAME}" | cut -f1)
+            echo "  Done: ${ZIP_NAME} (${ZIP_SIZE})"
+            
+            ZIP_LIST="${ZIP_LIST}- ${ZIP_NAME} (${ZIP_SIZE}) — ${RELEASE_NAME} (${RELEASE_DATE})
+          "
+            
+            PROCESSED=$((PROCESSED + 1))
+            
+            rm -rf "${{ env.WORK_DIR }}/downloads/$release_tag"
+            rm -rf "${{ env.WORK_DIR }}/extracted/$release_tag"
+            rm -rf "$ZIP_DIR"
+            
+          done < ${{ env.WORK_DIR }}/release_list.txt
           
           echo ""
           echo "========================================="
-          echo "ZIP: ${ZIP_NAME} (${ZIP_SIZE})"
-          echo "Restore: ${TOTAL_RESTORE} files"
-          echo "Delete: ${DELETE_COUNT} items"
-          echo "========================================="
+          echo "Batch complete!"
+          echo "  Processed: $PROCESSED"
+          echo "  Skipped: $SKIPPED"
+          echo ""
+          echo "Generated ZIPs:"
+          ls -lh ${{ env.WORK_DIR }}/output/
+          
+          echo "processed=$PROCESSED" >> $GITHUB_OUTPUT
+          echo "skipped=$SKIPPED" >> $GITHUB_OUTPUT
+          
+          echo "zip_list<<ZIPLISTEOF" >> $GITHUB_OUTPUT
+          echo "$ZIP_LIST" >> $GITHUB_OUTPUT
+          echo "ZIPLISTEOF" >> $GITHUB_OUTPUT
 
-      - name: Upload comparison artifacts
+      - name: Upload all ZIPs as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: comparison-report-${{ steps.fetch.outputs.release_tag }}
-          path: |
-            ${{ env.WORK_DIR }}/comparison_report.md
-            ${{ env.WORK_DIR }}/filtered_diff.txt
-            ${{ env.WORK_DIR }}/full_diff.txt
+          name: all-gapps-to-vanilla-zips
+          path: ${{ env.WORK_DIR }}/output/*.zip
           retention-days: 30
 
-      - name: Upload recovery ZIP
-        uses: actions/upload-artifact@v4
+      - name: Create GitHub Release
+        if: ${{ github.event.inputs.create_release == 'true' && steps.process_releases.outputs.processed > 0 }}
+        uses: softprops/action-gh-release@v2
         with:
-          name: ${{ steps.generate_zip.outputs.zip_name }}
-          path: ${{ steps.generate_zip.outputs.zip_path }}
-          retention-days: 30
+          tag_name: gapps-to-vanilla-${{ github.run_id }}
+          name: "gapps-to-vanilla - ${{ steps.process_releases.outputs.processed }} versions"
+          body: |
+            ## gapps-to-vanilla Batch Release
+            
+            **Source:** ${{ steps.set_api.outputs.api_url }}
+            **Generated:** ${{ env.GENERATED_DATE }}
+            **Versions processed:** ${{ steps.process_releases.outputs.processed }}
+            
+            ### Included ZIPs:
+            ${{ steps.process_releases.outputs.zip_list }}
+            
+            ### Instructions
+            1. Download the ZIP matching your GSI version
+            2. Boot into TWRP/OrangeFox recovery
+            3. Flash the ZIP
+            4. Reboot system
+            
+            ### What it does
+            - Removes all GAPPS files and directories
+            - Restores VANILLA AOSP files
+            - Preserves build.prop
+          files: ${{ env.WORK_DIR }}/output/*
+          draft: false
+          prerelease: false
+        env:
+          GENERATED_DATE: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
       - name: Display summary
         run: |
-          echo "## GSI Comparison Complete" >> $GITHUB_STEP_SUMMARY
+          echo "## Batch Generation Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Release Info" >> $GITHUB_STEP_SUMMARY
-          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Release | ${{ steps.fetch.outputs.release_name }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Tag | ${{ steps.fetch.outputs.release_tag }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Published | ${{ steps.fetch.outputs.release_date }} |" >> $GITHUB_STEP_SUMMARY
+          echo "**Source:** ${{ steps.set_api.outputs.api_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Processed:** ${{ steps.process_releases.outputs.processed }} versions" >> $GITHUB_STEP_SUMMARY
+          echo "**Skipped:** ${{ steps.process_releases.outputs.skipped }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Downloads" >> $GITHUB_STEP_SUMMARY
-          echo "| Artifact | Description |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|-------------|" >> $GITHUB_STEP_SUMMARY
-          echo "| comparison-report-${{ steps.fetch.outputs.release_tag }} | Comparison report |" >> $GITHUB_STEP_SUMMARY
-          echo "| ${{ steps.generate_zip.outputs.zip_name }} | Recovery ZIP (${{ steps.generate_zip.outputs.zip_size }}) |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### ZIP Contents" >> $GITHUB_STEP_SUMMARY
-          echo "- Restore: ${{ steps.generate_zip.outputs.total_restore }} files" >> $GITHUB_STEP_SUMMARY
-          echo "- Delete: ${{ steps.generate_zip.outputs.delete_count }} items" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### How to use" >> $GITHUB_STEP_SUMMARY
-          echo "1. Download **${{ steps.generate_zip.outputs.zip_name }}**" >> $GITHUB_STEP_SUMMARY
-          echo "2. Flash via TWRP/OrangeFox recovery" >> $GITHUB_STEP_SUMMARY
-          echo "3. Reboot system" >> $GITHUB_STEP_SUMMARY
+          echo "### Generated ZIPs:" >> $GITHUB_STEP_SUMMARY
+          ls -lh ${{ env.WORK_DIR }}/output/*.zip | while read -r line; do
+            echo "- $line" >> $GITHUB_STEP_SUMMARY
+          done
