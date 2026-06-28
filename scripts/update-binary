@@ -30,11 +30,10 @@ SYSTEM_MOUNT="/system"
 PRODUCT_MOUNT="/product"
 SYSTEM_EXT_MOUNT="/system_ext"
 
-ui_print "Step 1/9: Mounting partitions"
+ui_print "Step 1/6: Mounting partitions"
 for point in $SYSTEM_MOUNT $PRODUCT_MOUNT $SYSTEM_EXT_MOUNT; do
     ui_print "  -> $point"
     
-    # Check if partition is already mounted
     if mount | grep -q " $point "; then
         mount -o remount,rw $point 2>/dev/null
     else
@@ -52,7 +51,7 @@ for point in $SYSTEM_MOUNT $PRODUCT_MOUNT $SYSTEM_EXT_MOUNT; do
 done
 
 ui_print " "
-ui_print "Step 2/9: Checking free space"
+ui_print "Step 2/6: Checking free space"
 for point in $SYSTEM_MOUNT $PRODUCT_MOUNT $SYSTEM_EXT_MOUNT; do
     FREE=$(df -k $point | tail -1 | awk '{print $4}')
     ui_print "  -> $point: ${FREE}KB free"
@@ -62,72 +61,78 @@ for point in $SYSTEM_MOUNT $PRODUCT_MOUNT $SYSTEM_EXT_MOUNT; do
 done
 
 ui_print " "
-ui_print "Step 3/9: Backing up build.prop"
-for part in system system_ext product; do
-    MOUNT_POINT=$(eval echo \$${part^^}_MOUNT)
-    if [ -f "$MOUNT_POINT/build.prop" ]; then
-        cp "$MOUNT_POINT/build.prop" "/tmp/${part}_build.prop.bak"
-        ui_print "  -> Backed up $part/build.prop"
-    fi
-done
+ui_print "Step 3/6: Extracting delete list from ZIP"
+TMPDIR=/tmp/gapps_to_vanilla
+rm -rf $TMPDIR
+mkdir -p $TMPDIR
+cd $TMPDIR
 
-ui_print " "
-ui_print "Step 4/9: Removing GAPPS files"
-if [ -f "/tmp/delete.list" ]; then
-    DELETED=0
-    while IFS= read -r file; do
-        if [ -n "$file" ] && [ -f "$file" ]; then
-            rm -f "$file"
-            DELETED=$((DELETED + 1))
-        elif [ -n "$file" ] && [ -d "$file" ]; then
-            rm -rf "$file"
-            DELETED=$((DELETED + 1))
-        fi
-    done < "/tmp/delete.list"
-    ui_print "  Removed $DELETED files/directories"
+# Extract only delete.list first
+unzip -o "$ZIPFILE" 'delete.list' -d . > /dev/null 2>&1
+if [ -f "delete.list" ]; then
+    cp delete.list /tmp/delete.list
+    DELETE_COUNT=$(wc -l < /tmp/delete.list)
+    ui_print "  Found $DELETE_COUNT items to remove"
 else
-    ui_print "  No files to remove"
+    touch /tmp/delete.list
+    ui_print "  No items to remove"
 fi
 
 ui_print " "
-ui_print "Step 5/9: Extracting AOSP files"
-TMPDIR=/tmp/gapps_to_vanilla
-mkdir -p $TMPDIR
-cd $TMPDIR
-unzip -o "$ZIPFILE" 'system/*' 'system_ext/*' 'product/*' -d . > /dev/null 2>&1
-EXTRACT_COUNT=$(find system system_ext product -type f 2>/dev/null | wc -l)
-ui_print "  Extracted $EXTRACT_COUNT AOSP files"
+ui_print "Step 4/6: Removing GAPPS files"
+if [ -s "/tmp/delete.list" ]; then
+    DELETED=0
+    while IFS= read -r path; do
+        if [ -n "$path" ]; then
+            if [ -f "$path" ]; then
+                rm -f "$path"
+                DELETED=$((DELETED + 1))
+            elif [ -d "$path" ]; then
+                rm -rf "$path"
+                DELETED=$((DELETED + 1))
+            fi
+        fi
+    done < "/tmp/delete.list"
+    ui_print "  Removed $DELETED items"
+else
+    ui_print "  Nothing to remove"
+fi
 
 ui_print " "
-ui_print "Step 6/9: Copying AOSP files to partitions"
+ui_print "Step 5/6: Extracting and restoring VANILLA files"
+cd $TMPDIR
+
+# Extract only system, system_ext, product from ZIP
+unzip -o "$ZIPFILE" 'system/*' 'system_ext/*' 'product/*' -d . > /dev/null 2>&1
+EXTRACT_COUNT=$(find system system_ext product -type f 2>/dev/null | wc -l)
+ui_print "  Extracted $EXTRACT_COUNT files"
+
 for dir in system system_ext product; do
     if [ -d "$TMPDIR/$dir" ]; then
         MOUNT_POINT="/$dir"
-        ui_print "  -> Processing $dir..."
+        ui_print "  -> Restoring $dir..."
         cd "$TMPDIR/$dir"
         find . -type f | while IFS= read -r file; do
             TARGET="$MOUNT_POINT/${file#./}"
             TARGET_DIR=$(dirname "$TARGET")
             mkdir -p "$TARGET_DIR"
             cp -f "$file" "$TARGET"
+            chmod --reference="$file" "$TARGET" 2>/dev/null || chmod 644 "$TARGET"
         done
-        ui_print "    $dir files copied"
+        ui_print "    $dir restored"
     fi
 done
 
 ui_print " "
-ui_print "Step 9/9: Cleanup"
+ui_print "Step 6/6: Cleanup"
 rm -rf /tmp/gapps_to_vanilla /tmp/delete.list
-for part in system system_ext product; do
-    rm -f "/tmp/${part}_build.prop.bak"
-done
 
 ui_print " "
 ui_print "========================================="
 ui_print "Installation complete!"
 ui_print " "
-ui_print "GAPPS files removed and AOSP files"
-ui_print "restored from VANILLA build"
+ui_print "GAPPS removed, VANILLA AOSP restored"
+ui_print "Please reboot system"
 ui_print "========================================="
 ui_print " "
 
