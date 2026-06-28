@@ -1,4 +1,4 @@
-name: RELEASE - Batch gapps-to-vanilla Generator
+name: release
 
 on:
   workflow_dispatch:
@@ -70,9 +70,10 @@ jobs:
               tag: .tag_name,
               name: .name,
               date: .published_at,
-              version: (.name | capture("(?<v>[0-9]+\\.[0-9]+)") | .v)
+              version: (.name | capture("(?<v>[0-9]+\\.[0-9]+)") | .v // "0.0")
             }) |
-            sort_by(.version | split(".") | [.[0]|tonumber, .[1]|tonumber]) | reverse |
+            map(select(.version != null and .version != "0.0")) |
+            sort_by(.version | split(".") | map(tonumber? // 0)) | reverse |
             unique_by(.version) |
             .[:($count|tonumber)] |
             sort_by(.date) | reverse |
@@ -104,11 +105,10 @@ jobs:
         id: process_releases
         run: |
           mkdir -p ${{ env.WORK_DIR }}/output
+          rm -f ${{ env.WORK_DIR }}/output/*.zip
+          
           PROCESSED=0
           SKIPPED=0
-          
-          # Clear previous output
-          rm -f ${{ env.WORK_DIR }}/output/*.zip
           
           while IFS= read -r release_tag; do
             echo ""
@@ -135,21 +135,21 @@ jobs:
             curl -fL --retry 3 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/$release_tag/vanilla.img.xz" "$VANILLA_URL" 2>/dev/null
             curl -fL --retry 3 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/$release_tag/gapps.img.xz" "$GAPPS_URL" 2>/dev/null
             
-            echo "  Extracting..."
+            echo "  Extracting VANILLA..."
             mkdir -p ${{ env.WORK_DIR }}/extracted/$release_tag/vanilla
-            mkdir -p ${{ env.WORK_DIR }}/extracted/$release_tag/gapps
-            
             xz -d "${{ env.WORK_DIR }}/downloads/$release_tag/vanilla.img.xz" 2>/dev/null
             set +e
             7z x "${{ env.WORK_DIR }}/downloads/$release_tag/vanilla.img" -o"${{ env.WORK_DIR }}/extracted/$release_tag/vanilla" > /dev/null 2>&1
             set -e
             
+            echo "  Extracting GAPPS..."
+            mkdir -p ${{ env.WORK_DIR }}/extracted/$release_tag/gapps
             xz -d "${{ env.WORK_DIR }}/downloads/$release_tag/gapps.img.xz" 2>/dev/null
             set +e
             7z x "${{ env.WORK_DIR }}/downloads/$release_tag/gapps.img" -o"${{ env.WORK_DIR }}/extracted/$release_tag/gapps" > /dev/null 2>&1
             set -e
             
-            echo "  Comparing..."
+            echo "  Comparing images..."
             cd ${{ env.WORK_DIR }}/extracted/$release_tag
             diff -qr vanilla gapps 2>&1 | grep -v 'No such file or directory' > full_diff_raw.txt || true
             
@@ -163,7 +163,11 @@ jobs:
             grep '^Only in vanilla' filtered_diff.txt | sed 's|^Only in vanilla/||' | sed 's|: |/|' | sort -u > vanilla_only.txt
             grep '^Files.*differ' filtered_diff.txt | sed 's|^Files vanilla/||' | sed 's| and .* differ||' | sort -u > differ.txt
             
-            echo "  Delete: $(wc -l < gapps_only.txt), Restore: $(wc -l < vanilla_only.txt), Replace: $(wc -l < differ.txt)"
+            GAPPS_COUNT=$(wc -l < gapps_only.txt)
+            VANILLA_COUNT=$(wc -l < vanilla_only.txt)
+            DIFFER_COUNT=$(wc -l < differ.txt)
+            
+            echo "  Delete: $GAPPS_COUNT, Restore: $VANILLA_COUNT, Replace: $DIFFER_COUNT"
             
             ZIP_DIR="${{ env.WORK_DIR }}/zip_$release_tag"
             rm -rf "$ZIP_DIR"
@@ -204,7 +208,7 @@ jobs:
             zip -r "${{ env.WORK_DIR }}/output/${ZIP_NAME}" . -x "*.git*" > /dev/null 2>&1
             
             ZIP_SIZE=$(du -h "${{ env.WORK_DIR }}/output/${ZIP_NAME}" | cut -f1)
-            echo "  ✅ Created: ${ZIP_NAME} (${ZIP_SIZE})"
+            echo "  Done: ${ZIP_NAME} (${ZIP_SIZE})"
             
             PROCESSED=$((PROCESSED + 1))
             
@@ -226,22 +230,20 @@ jobs:
           echo "processed=$PROCESSED" >> $GITHUB_OUTPUT
           echo "skipped=$SKIPPED" >> $GITHUB_OUTPUT
 
-      - name: Upload each ZIP as separate artifact
+      - name: Upload each ZIP as individual artifact
         run: |
-          echo "Uploading individual artifacts..."
+          mkdir -p ${{ env.WORK_DIR }}/artifacts
           for zip_file in ${{ env.WORK_DIR }}/output/*.zip; do
-            zip_name=$(basename "$zip_file")
-            artifact_name="${zip_name%.zip}"
-            echo "  Uploading: $zip_name as $artifact_name"
-            echo "::notice::Artifact: $artifact_name"
+            zip_name=$(basename "$zip_file" .zip)
+            mkdir -p "${{ env.WORK_DIR }}/artifacts/$zip_name"
+            cp "$zip_file" "${{ env.WORK_DIR }}/artifacts/$zip_name/"
           done
 
-      - name: Upload ZIP 1
-        if: always()
+      - name: Upload all ZIPs as artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: gapps-to-vanilla-1
-          path: ${{ env.WORK_DIR }}/output/gapps-to-vanilla-*.zip
+          name: all-gapps-to-vanilla-zips
+          path: ${{ env.WORK_DIR }}/output/*.zip
           retention-days: 30
 
       - name: Create GitHub Release
@@ -249,23 +251,27 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: gapps-to-vanilla-${{ github.run_id }}
-          name: "gapps-to-vanilla Batch - ${{ steps.process_releases.outputs.processed }} versions"
+          name: "gapps-to-vanilla - ${{ steps.process_releases.outputs.processed }} versions"
           body: |
             ## gapps-to-vanilla Batch Release
             
-            **Generated:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+            **Generated:** $(date -u)
             **Source:** ${{ steps.set_api.outputs.api_url }}
             **Versions processed:** ${{ steps.process_releases.outputs.processed }}
             
-            ### Download Instructions
-            1. Download the ZIP for your version
-            2. Flash via TWRP/OrangeFox recovery
-            3. Reboot system
+            ### Included ZIPs:
+            $(ls -lh ${{ env.WORK_DIR }}/output/*.zip | while read -r line; do echo "- $line"; done)
             
-            ### Notes
-            - Each ZIP converts GAPPS → VANILLA for a specific release
-            - build.prop is preserved
-            - SELinux contexts are maintained
+            ### Instructions
+            1. Download the ZIP matching your GSI version
+            2. Boot into TWRP/OrangeFox recovery
+            3. Flash the ZIP
+            4. Reboot system
+            
+            ### What it does
+            - Removes all GAPPS files and directories
+            - Restores VANILLA AOSP files
+            - Preserves build.prop
           files: ${{ env.WORK_DIR }}/output/*
           draft: false
           prerelease: false
@@ -284,5 +290,5 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Download" >> $GITHUB_STEP_SUMMARY
-          echo "Check the **Release** section for all ZIPs as a single download," >> $GITHUB_STEP_SUMMARY
-          echo "or download individual artifacts from the **Artifacts** section." >> $GITHUB_STEP_SUMMARY
+          echo "- **All ZIPs:** Check the Release or Artifacts section" >> $GITHUB_STEP_SUMMARY
+          echo "- **Individual:** Each ZIP is also available as separate artifact" >> $GITHUB_STEP_SUMMARY
