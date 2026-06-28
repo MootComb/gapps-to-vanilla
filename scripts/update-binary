@@ -7,18 +7,33 @@
 OUTFD=$2
 ZIPFILE=$3
 
+LOG_FILE="/tmp/gapps-to-vanilla.log"
+
+log() {
+    echo "$(date '+%H:%M:%S') $1" >> $LOG_FILE
+}
+
 ui_print() {
     echo -n -e "ui_print $1\n" >> /proc/self/fd/$OUTFD
     echo -n -e "ui_print\n" >> /proc/self/fd/$OUTFD
+    log "UI: $1"
 }
 
 abort() {
     ui_print " "
     ui_print "ERROR: $1"
+    log "ABORT: $1"
     ui_print " "
     ui_print "Installation aborted"
+    ui_print "Log saved to /tmp/gapps-to-vanilla.log"
     exit 1
 }
+
+# Initialize log
+echo "=========================================" > $LOG_FILE
+echo "gapps-to-vanilla installation log" >> $LOG_FILE
+echo "Started: $(date)" >> $LOG_FILE
+echo "=========================================" >> $LOG_FILE
 
 ui_print "========================================="
 ui_print "   gapps-to-vanilla"
@@ -30,40 +45,53 @@ SYSTEM_MOUNT="/system"
 PRODUCT_MOUNT="/product"
 SYSTEM_EXT_MOUNT="/system_ext"
 
+log "Step 1/6: Mounting partitions"
 ui_print "Step 1/6: Mounting partitions"
+
 for point in $SYSTEM_MOUNT $PRODUCT_MOUNT $SYSTEM_EXT_MOUNT; do
     ui_print "  -> $point"
+    log "Mounting $point"
     
     if mount | grep -q " $point "; then
         mount -o remount,rw $point 2>/dev/null
-        ui_print "    Remounted as RW"
+        log "  Remounted as RW"
     else
         mount -o rw $point 2>/dev/null
-        ui_print "    Mounted as RW"
+        log "  Mounted as RW"
     fi
     
     if ! touch $point/.test 2>/dev/null; then
         mount -o rw,remount $point 2>/dev/null
         if ! touch $point/.test 2>/dev/null; then
+            log "  FAILED to mount $point"
             abort "Failed to mount $point as RW"
         fi
     fi
     rm -f $point/.test
     ui_print "    [OK] $point writable"
+    log "  [OK] $point writable"
 done
 
+log ""
+log "Step 2/6: Checking free space"
 ui_print " "
 ui_print "Step 2/6: Checking free space"
+
 for point in $SYSTEM_MOUNT $PRODUCT_MOUNT $SYSTEM_EXT_MOUNT; do
     FREE=$(df -k $point | tail -1 | awk '{print $4}')
     ui_print "  -> $point: ${FREE}KB free"
+    log "  $point: ${FREE}KB free"
     if [ "$FREE" -lt 51200 ]; then
         ui_print "    WARNING: Low space on $point"
+        log "    WARNING: Low space"
     fi
 done
 
+log ""
+log "Step 3/6: Extracting delete list from ZIP"
 ui_print " "
 ui_print "Step 3/6: Extracting delete list from ZIP"
+
 TMPDIR=/tmp/gapps_to_vanilla
 rm -rf $TMPDIR
 mkdir -p $TMPDIR
@@ -73,14 +101,23 @@ unzip -o "$ZIPFILE" 'delete.list' -d . > /dev/null 2>&1
 if [ -f "delete.list" ]; then
     cp delete.list /tmp/delete.list
     DELETE_COUNT=$(wc -l < /tmp/delete.list)
+    log "  Found $DELETE_COUNT items to remove"
     ui_print "  Found $DELETE_COUNT items to remove"
+    log "  Delete list preview:"
+    head -5 /tmp/delete.list | while IFS= read -r line; do
+        log "    $line"
+    done
 else
     touch /tmp/delete.list
-    ui_print "  WARNING: delete.list not found in ZIP!"
+    log "  WARNING: delete.list not found in ZIP!"
+    ui_print "  WARNING: delete.list not found!"
 fi
 
+log ""
+log "Step 4/6: Removing GAPPS files"
 ui_print " "
 ui_print "Step 4/6: Removing GAPPS files"
+
 if [ -s "/tmp/delete.list" ]; then
     DELETED_FILES=0
     DELETED_DIRS=0
@@ -92,24 +129,37 @@ if [ -s "/tmp/delete.list" ]; then
                 rm -f "$path"
                 if [ ! -f "$path" ]; then
                     DELETED_FILES=$((DELETED_FILES + 1))
+                    log "  [DELETED] $path"
                     ui_print "  [DELETED] $path"
                 else
+                    log "  [FAILED] $path"
                     ui_print "  [FAILED] $path"
                 fi
             elif [ -d "$path" ]; then
                 rm -rf "$path"
                 if [ ! -d "$path" ]; then
                     DELETED_DIRS=$((DELETED_DIRS + 1))
+                    log "  [DELETED] $path/ (directory)"
                     ui_print "  [DELETED] $path/ (directory)"
                 else
+                    log "  [FAILED] $path/ (directory)"
                     ui_print "  [FAILED] $path/ (directory)"
                 fi
             else
                 NOT_FOUND=$((NOT_FOUND + 1))
+                log "  [NOT FOUND] $path"
                 ui_print "  [NOT FOUND] $path"
             fi
         fi
     done < "/tmp/delete.list"
+    
+    log ""
+    log "  Summary:"
+    log "    Files deleted: $DELETED_FILES"
+    log "    Directories deleted: $DELETED_DIRS"
+    if [ $NOT_FOUND -gt 0 ]; then
+        log "    Not found: $NOT_FOUND"
+    fi
     
     ui_print " "
     ui_print "  Summary:"
@@ -119,27 +169,36 @@ if [ -s "/tmp/delete.list" ]; then
         ui_print "    Not found: $NOT_FOUND"
     fi
 else
+    log "  Nothing to remove"
     ui_print "  Nothing to remove"
 fi
 
+log ""
+log "Step 5/6: Extracting and restoring VANILLA files"
 ui_print " "
 ui_print "Step 5/6: Extracting and restoring VANILLA files"
-cd $TMPDIR
 
+cd $TMPDIR
 unzip -o "$ZIPFILE" 'system/*' 'system_ext/*' 'product/*' -d . > /dev/null 2>&1
 
 for dir in system system_ext product; do
     if [ -d "$dir" ]; then
         COUNT=$(find $dir -type f 2>/dev/null | wc -l)
+        log "  $dir/: $COUNT files to restore"
         ui_print "  $dir/: $COUNT files to restore"
     fi
 done
 
-ui_print " "
+TOTAL_RESTORED=0
+TOTAL_FAILED=0
 
 for dir in system system_ext product; do
     if [ -d "$TMPDIR/$dir" ]; then
         MOUNT_POINT="/$dir"
+        RESTORED=0
+        FAILED=0
+        
+        log "  -> Restoring $dir..."
         ui_print "  -> Restoring $dir..."
         
         cd "$TMPDIR/$dir"
@@ -149,26 +208,54 @@ for dir in system system_ext product; do
             mkdir -p "$TARGET_DIR"
             if cp -f "$file" "$TARGET"; then
                 chmod --reference="$file" "$TARGET" 2>/dev/null || chmod 644 "$TARGET"
-                ui_print "    + ${file#./}"
+                log "    + ${file#./}"
+                echo "RESTORED" >> /tmp/restore_status.txt
             else
-                ui_print "    FAILED: ${file#./}"
+                log "    FAILED: ${file#./}"
+                echo "FAILED" >> /tmp/restore_status.txt
             fi
         done
         
-        ui_print "    $dir done"
+        if [ -f /tmp/restore_status.txt ]; then
+            RESTORED=$(grep -c 'RESTORED' /tmp/restore_status.txt)
+            FAILED=$(grep -c 'FAILED' /tmp/restore_status.txt)
+            TOTAL_RESTORED=$((TOTAL_RESTORED + RESTORED))
+            TOTAL_FAILED=$((TOTAL_FAILED + FAILED))
+            rm -f /tmp/restore_status.txt
+        fi
+        
+        log "    $dir: $RESTORED restored, $FAILED failed"
+        ui_print "    $dir: $RESTORED restored"
+        if [ $FAILED -gt 0 ]; then
+            ui_print "    $dir: $FAILED FAILED!"
+        fi
     fi
 done
 
+log ""
+log "Step 6/6: Cleanup"
 ui_print " "
 ui_print "Step 6/6: Cleanup"
-rm -rf /tmp/gapps_to_vanilla /tmp/delete.list
+
+rm -rf /tmp/gapps_to_vanilla /tmp/delete.list /tmp/restore_status.txt
+
+log ""
+log "========================================="
+log "Installation complete!"
+log "  Files restored: $TOTAL_RESTORED"
+log "  Files failed: $TOTAL_FAILED"
+log "  GAPPS items deleted: $((DELETED_FILES + DELETED_DIRS))"
+log "  Not found: $NOT_FOUND"
+log "Finished: $(date)"
+log "========================================="
 
 ui_print " "
 ui_print "========================================="
 ui_print "Installation complete!"
 ui_print " "
 ui_print "GAPPS removed, VANILLA AOSP restored"
-ui_print "Please reboot system"
+ui_print " "
+ui_print "Log saved: /tmp/gapps-to-vanilla.log"
 ui_print "========================================="
 ui_print " "
 
