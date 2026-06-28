@@ -129,7 +129,8 @@ jobs:
             fi
             
             VERSION_NUM=$(echo "$RELEASE_NAME" | grep -oP '[0-9]+\.[0-9]+' | head -1)
-            echo "Release: $RELEASE_NAME (v$VERSION_NUM)"
+            RELEASE_DATE=$(echo "$RELEASE_DATA" | jq -r '.published_at' | cut -d'T' -f1)
+            echo "Release: $RELEASE_NAME (v$VERSION_NUM, $RELEASE_DATE)"
             
             echo "  Downloading..."
             mkdir -p ${{ env.WORK_DIR }}/downloads/$release_tag
@@ -205,7 +206,7 @@ jobs:
             chmod +x "$ZIP_DIR/META-INF/com/google/android/update-binary"
             
             if [[ -n "$VERSION_NUM" ]]; then
-              ZIP_NAME="gapps-to-vanilla_infinityX-${VERSION_NUM}_${release_tag}.zip"
+              ZIP_NAME="gapps-to-vanilla_infinityX-${VERSION_NUM}.zip"
             else
               ZIP_NAME="gapps-to-vanilla-${release_tag}.zip"
             fi
@@ -216,7 +217,7 @@ jobs:
             ZIP_SIZE=$(du -h "${{ env.WORK_DIR }}/output/${ZIP_NAME}" | cut -f1)
             echo "  Done: ${ZIP_NAME} (${ZIP_SIZE})"
             
-            ZIP_LIST="$ZIP_LIST  - ${ZIP_NAME} (${ZIP_SIZE}) — $RELEASE_NAME
+            ZIP_LIST="${ZIP_LIST}- ${ZIP_NAME} (${ZIP_SIZE}) — ${RELEASE_NAME} (${RELEASE_DATE})
           "
             
             PROCESSED=$((PROCESSED + 1))
