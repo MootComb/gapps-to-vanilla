@@ -160,7 +160,6 @@ jobs:
           diff -qr vanilla gapps 2>&1 | \
             grep -v 'No such file or directory' > ${{ env.WORK_DIR }}/full_diff_raw.txt || true
           
-          # Normalize paths and filter
           cat ${{ env.WORK_DIR }}/full_diff_raw.txt | \
             sed 's|system/product/|product/|g' | \
             sed 's|system/system_ext/|system_ext/|g' | \
@@ -178,27 +177,25 @@ jobs:
         run: |
           CURRENT_DATE=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
           
-          cat > ${{ env.WORK_DIR }}/comparison_report.md << EOF
-          # GSI Image Comparison: VANILLA vs GAPPS
-          
-          **Release:** ${{ steps.fetch.outputs.release_name }}
-          
-          **Tag:** ${{ steps.fetch.outputs.release_tag }}
-          
-          **Published:** ${{ steps.fetch.outputs.release_date }}
-          
-          **Comparison date:** ${CURRENT_DATE}
-          
-          ---
-          
-          ## Filtered structural differences
-          
-          Filter: Only \`system/\`, \`system_ext/\`, \`product/\` - excluding \`build.prop\`
-          
-          \`\`\`diff
-          $(cat ${{ env.WORK_DIR }}/filtered_diff.txt)
-          \`\`\`
-          EOF
+          echo "# GSI Image Comparison: VANILLA vs GAPPS" > ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "**Release:** ${{ steps.fetch.outputs.release_name }}" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "**Tag:** ${{ steps.fetch.outputs.release_tag }}" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "**Published:** ${{ steps.fetch.outputs.release_date }}" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "**Comparison date:** ${CURRENT_DATE}" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "---" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "## Filtered structural differences" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "Filter: Only \`system/\`, \`system_ext/\`, \`product/\` - excluding \`build.prop\`" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo "" >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo '```diff' >> ${{ env.WORK_DIR }}/comparison_report.md
+          cat ${{ env.WORK_DIR }}/filtered_diff.txt >> ${{ env.WORK_DIR }}/comparison_report.md
+          echo '```' >> ${{ env.WORK_DIR }}/comparison_report.md
 
       - name: Generate gapps-to-vanilla recovery ZIP
         id: generate_zip
@@ -228,7 +225,6 @@ jobs:
           echo "To RESTORE: $VANILLA_ONLY_COUNT items"
           echo "To REPLACE: $DIFFER_COUNT items"
           
-          # RESTORE vanilla-only items
           echo ""
           echo "=== RESTORING VANILLA-ONLY ITEMS ==="
           VANILLA_COUNT=0
@@ -253,7 +249,6 @@ jobs:
             fi
           done < ${{ env.WORK_DIR }}/vanilla_only.txt
           
-          # REPLACE different files
           echo ""
           echo "=== REPLACING DIFFERENT FILES ==="
           DIFF_COUNT=0
@@ -269,7 +264,6 @@ jobs:
             fi
           done < ${{ env.WORK_DIR }}/differ.txt
           
-          # CREATE delete list
           echo ""
           echo "=== CREATING DELETE LIST ==="
           while IFS= read -r item; do
@@ -280,7 +274,8 @@ jobs:
           DELETE_COUNT=$(wc -l < "$ZIP_DIR/delete.list" 2>/dev/null || echo 0)
           echo "Delete list: $DELETE_COUNT entries"
           
-          # META-INF
+          echo ""
+          echo "=== CREATING META-INF ==="
           mkdir -p "$ZIP_DIR/META-INF/com/google/android"
           cp "${{ github.workspace }}/scripts/update-binary" "$ZIP_DIR/META-INF/com/google/android/update-binary"
           cp "${{ github.workspace }}/scripts/updater-script" "$ZIP_DIR/META-INF/com/google/android/updater-script"
@@ -289,39 +284,42 @@ jobs:
           RELEASE_TAG="${{ steps.fetch.outputs.release_tag }}"
           RECOVERY_ZIP="gapps-to-vanilla-${RELEASE_TAG}.zip"
           ARTIFACT_ZIP="gapps-to-vanilla-${RELEASE_TAG}-flashable.zip"
+          CURRENT_DATE=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          TOTAL_RESTORE=$((VANILLA_COUNT + DIFF_COUNT))
           
-          # Create recovery ZIP
+          echo ""
+          echo "=== CREATING RECOVERY ZIP ==="
           cd "$ZIP_DIR"
           zip -r "${{ env.WORK_DIR }}/${RECOVERY_ZIP}" . -x "*.git*"
+          echo "Recovery ZIP created"
           
-          # Create upload package with README
+          echo ""
+          echo "=== CREATING UPLOAD PACKAGE ==="
           mkdir -p ${{ env.WORK_DIR }}/upload
           cp "${{ env.WORK_DIR }}/${RECOVERY_ZIP}" "${{ env.WORK_DIR }}/upload/${RECOVERY_ZIP}"
           
-          cat > "${{ env.WORK_DIR }}/upload/README.txt" << READMEEOF
-=========================================
-gapps-to-vanilla Recovery ZIP
-=========================================
-
-Release: ${{ steps.fetch.outputs.release_name }}
-Tag: ${RELEASE_TAG}
-Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-
-This package contains:
-  - ${RECOVERY_ZIP} - Flash this via recovery
-  - README.txt - This file
-
-Instructions:
-  1. Extract this ZIP file
-  2. Copy ${RECOVERY_ZIP} to your device
-  3. Boot into TWRP/OrangeFox recovery
-  4. Flash ${RECOVERY_ZIP}
-  5. Reboot system
-
-What it does:
-  - Removes GAPPS files (${DELETE_COUNT} items)
-  - Restores VANILLA AOSP files ($((VANILLA_COUNT + DIFF_COUNT)) files)
-READMEEOF
+          echo "=========================================" > "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "gapps-to-vanilla Recovery ZIP" >> "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "=========================================" >> "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "" >> "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "Release: ${{ steps.fetch.outputs.release_name }}" >> "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "Tag: ${RELEASE_TAG}" >> "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "Date: ${CURRENT_DATE}" >> "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "" >> "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "This package contains:" >> "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "  - ${RECOVERY_ZIP} - Flash this via recovery" >> "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "  - README.txt - This file" >> "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "" >> "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "Instructions:" >> "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "  1. Extract this ZIP file" >> "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "  2. Copy ${RECOVERY_ZIP} to your device" >> "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "  3. Boot into TWRP/OrangeFox recovery" >> "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "  4. Flash ${RECOVERY_ZIP}" >> "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "  5. Reboot system" >> "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "" >> "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "What it does:" >> "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "  - Removes GAPPS files (${DELETE_COUNT} items)" >> "${{ env.WORK_DIR }}/upload/README.txt"
+          echo "  - Restores VANILLA AOSP files (${TOTAL_RESTORE} files)" >> "${{ env.WORK_DIR }}/upload/README.txt"
           
           cd "${{ env.WORK_DIR }}/upload"
           zip -r "${{ env.WORK_DIR }}/${ARTIFACT_ZIP}" . -x "*.git*"
@@ -337,7 +335,7 @@ READMEEOF
           echo "========================================="
           echo "Recovery ZIP: ${RECOVERY_ZIP} (${ZIP_SIZE})"
           echo "Artifact: ${ARTIFACT_ZIP}"
-          echo "Restore: $((VANILLA_COUNT + DIFF_COUNT)) files"
+          echo "Restore: ${TOTAL_RESTORE} files"
           echo "Delete: ${DELETE_COUNT} items"
           echo "========================================="
 
@@ -360,26 +358,24 @@ READMEEOF
 
       - name: Display summary
         run: |
-          {
-            echo "## GSI Comparison Complete"
-            echo ""
-            echo "### Release Info"
-            echo "| Field | Value |"
-            echo "|-------|-------|"
-            echo "| Release | ${{ steps.fetch.outputs.release_name }} |"
-            echo "| Tag | ${{ steps.fetch.outputs.release_tag }} |"
-            echo "| Published | ${{ steps.fetch.outputs.release_date }} |"
-            echo ""
-            echo "### Downloads"
-            echo "| Artifact | Description |"
-            echo "|----------|-------------|"
-            echo "| comparison-report-${{ steps.fetch.outputs.release_tag }} | Comparison report |"
-            echo "| gapps-to-vanilla-${{ steps.fetch.outputs.release_tag }} | Recovery flashable package |"
-            echo ""
-            echo "### How to use"
-            echo "1. Download **gapps-to-vanilla-${{ steps.fetch.outputs.release_tag }}.zip**"
-            echo "2. Extract it -> get **${{ steps.generate_zip.outputs.recovery_zip }}** + README.txt"
-            echo "3. Copy **${{ steps.generate_zip.outputs.recovery_zip }}** to device"
-            echo "4. Flash via TWRP/OrangeFox"
-            echo "5. Reboot"
-          } >> $GITHUB_STEP_SUMMARY
+          echo "## GSI Comparison Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Release Info" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Release | ${{ steps.fetch.outputs.release_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | ${{ steps.fetch.outputs.release_tag }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Published | ${{ steps.fetch.outputs.release_date }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Downloads" >> $GITHUB_STEP_SUMMARY
+          echo "| Artifact | Description |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------------|" >> $GITHUB_STEP_SUMMARY
+          echo "| comparison-report-${{ steps.fetch.outputs.release_tag }} | Comparison report |" >> $GITHUB_STEP_SUMMARY
+          echo "| gapps-to-vanilla-${{ steps.fetch.outputs.release_tag }} | Recovery flashable package |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### How to use" >> $GITHUB_STEP_SUMMARY
+          echo "1. Download **gapps-to-vanilla-${{ steps.fetch.outputs.release_tag }}.zip**" >> $GITHUB_STEP_SUMMARY
+          echo "2. Extract it to get **${{ steps.generate_zip.outputs.recovery_zip }}** + README.txt" >> $GITHUB_STEP_SUMMARY
+          echo "3. Copy **${{ steps.generate_zip.outputs.recovery_zip }}** to device" >> $GITHUB_STEP_SUMMARY
+          echo "4. Flash via TWRP/OrangeFox" >> $GITHUB_STEP_SUMMARY
+          echo "5. Reboot" >> $GITHUB_STEP_SUMMARY
