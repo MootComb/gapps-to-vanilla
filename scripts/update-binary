@@ -41,35 +41,134 @@ ui_print "   Remove GAPPS and restore AOSP"
 ui_print "========================================="
 ui_print " "
 
-SYSTEM_MOUNT="/system"
-PRODUCT_MOUNT="/product"
-SYSTEM_EXT_MOUNT="/system_ext"
+log "Detecting partition layout..."
 
-log "Step 1/6: Mounting partitions"
+# Check all possible mount points
+FOUND_SYSTEM=""
+FOUND_PRODUCT=""
+FOUND_SYSTEM_EXT=""
+SYSTEM_ROOT_MOUNT=""
+
+# Check /system_root first (OrangeFox, some TWRP)
+if [ -d "/system_root/system" ] && [ -d "/system_root/system/app" ]; then
+    FOUND_SYSTEM="/system_root/system"
+    SYSTEM_ROOT_MOUNT="/system_root"
+    log "  Found /system_root/system (system_root layout)"
+
+# Check /system (standard)
+elif [ -d "/system/app" ] || [ -d "/system/bin" ]; then
+    FOUND_SYSTEM="/system"
+    log "  Found /system (standard layout)"
+
+# Check if /system is symlink to /system_root/system
+elif [ -L "/system" ]; then
+    REAL_SYSTEM=$(readlink -f /system)
+    if [ -d "$REAL_SYSTEM/app" ]; then
+        FOUND_SYSTEM="$REAL_SYSTEM"
+        SYSTEM_ROOT_MOUNT=$(dirname "$REAL_SYSTEM")
+        log "  /system is symlink to $REAL_SYSTEM"
+        log "  Using $FOUND_SYSTEM, root at $SYSTEM_ROOT_MOUNT"
+    fi
+fi
+
+# Check /product
+if [ -d "/product/app" ] || [ -d "/product/bin" ]; then
+    FOUND_PRODUCT="/product"
+    log "  Found /product"
+elif [ -L "/product" ]; then
+    FOUND_PRODUCT=$(readlink -f /product)
+    log "  /product is symlink to $FOUND_PRODUCT"
+fi
+
+# Check /system_ext
+if [ -d "/system_ext/app" ] || [ -d "/system_ext/bin" ]; then
+    FOUND_SYSTEM_EXT="/system_ext"
+    log "  Found /system_ext"
+elif [ -L "/system_ext" ]; then
+    FOUND_SYSTEM_EXT=$(readlink -f /system_ext)
+    log "  /system_ext is symlink to $FOUND_SYSTEM_EXT"
+fi
+
+if [ -z "$FOUND_SYSTEM" ]; then
+    abort "Cannot find system partition!"
+fi
+
+log "Final mount points:"
+log "  SYSTEM: $FOUND_SYSTEM"
+log "  PRODUCT: $FOUND_PRODUCT"
+log "  SYSTEM_EXT: $FOUND_SYSTEM_EXT"
+log "  SYSTEM_ROOT: $SYSTEM_ROOT_MOUNT"
+
 ui_print "Step 1/6: Mounting partitions"
+log "Step 1/6: Mounting partitions"
 
-for point in $SYSTEM_MOUNT $PRODUCT_MOUNT $SYSTEM_EXT_MOUNT; do
-    ui_print "  -> $point"
-    log "Mounting $point"
+# Function to mount partition as RW
+mount_rw() {
+    local mount_point="$1"
+    local device=""
     
-    if mount | grep -q " $point "; then
-        mount -o remount,rw $point 2>/dev/null
-        log "  Remounted as RW"
-    else
-        mount -o rw $point 2>/dev/null
-        log "  Mounted as RW"
+    # Find device for this mount point
+    device=$(mount | grep " $mount_point " | awk '{print $1}')
+    
+    if [ -z "$device" ]; then
+        # Try to find by mount point name
+        device=$(mount | grep "/$(basename $mount_point) " | awk '{print $1}')
     fi
     
-    if ! touch $point/.test 2>/dev/null; then
-        mount -o rw,remount $point 2>/dev/null
-        if ! touch $point/.test 2>/dev/null; then
-            log "  FAILED to mount $point"
+    if [ -n "$device" ]; then
+        log "  Device for $mount_point: $device"
+        
+        # Check filesystem type
+        FS_TYPE=$(mount | grep " $mount_point " | awk '{print $5}')
+        log "  Filesystem: $FS_TYPE"
+        
+        # Remount as RW
+        mount -o remount,rw $mount_point 2>/dev/null
+        if [ $? -eq 0 ]; then
+            log "  Remounted $mount_point as RW (remount)"
+        else
+            mount -o rw -t $FS_TYPE $device $mount_point 2>/dev/null
+            if [ $? -eq 0 ]; then
+                log "  Mounted $mount_point as RW (fresh mount)"
+            else
+                log "  WARNING: Failed to mount $mount_point as RW"
+            fi
+        fi
+    else
+        log "  No device found for $mount_point, trying direct remount"
+        mount -o remount,rw $mount_point 2>/dev/null || mount -o rw $mount_point 2>/dev/null
+    fi
+    
+    # Verify RW
+    if touch $mount_point/.test_rw 2>/dev/null; then
+        rm -f $mount_point/.test_rw
+        log "  [OK] $mount_point is now writable"
+        return 0
+    else
+        log "  [FAILED] $mount_point is still read-only"
+        return 1
+    fi
+}
+
+# Mount system_root first if exists
+if [ -n "$SYSTEM_ROOT_MOUNT" ]; then
+    ui_print "  -> $SYSTEM_ROOT_MOUNT (system root)"
+    log "  Mounting system root: $SYSTEM_ROOT_MOUNT"
+    mount_rw "$SYSTEM_ROOT_MOUNT"
+    if [ $? -ne 0 ]; then
+        abort "Failed to mount $SYSTEM_ROOT_MOUNT as RW"
+    fi
+fi
+
+# Mount all partitions
+for point in "$FOUND_SYSTEM" "$FOUND_PRODUCT" "$FOUND_SYSTEM_EXT"; do
+    if [ -n "$point" ] && [ "$point" != "$SYSTEM_ROOT_MOUNT" ]; then
+        ui_print "  -> $point"
+        log "  Mounting: $point"
+        if ! mount_rw "$point"; then
             abort "Failed to mount $point as RW"
         fi
     fi
-    rm -f $point/.test
-    ui_print "    [OK] $point writable"
-    log "  [OK] $point writable"
 done
 
 log ""
@@ -77,13 +176,17 @@ log "Step 2/6: Checking free space"
 ui_print " "
 ui_print "Step 2/6: Checking free space"
 
-for point in $SYSTEM_MOUNT $PRODUCT_MOUNT $SYSTEM_EXT_MOUNT; do
-    FREE=$(df -k $point | tail -1 | awk '{print $4}')
-    ui_print "  -> $point: ${FREE}KB free"
-    log "  $point: ${FREE}KB free"
-    if [ "$FREE" -lt 51200 ]; then
-        ui_print "    WARNING: Low space on $point"
-        log "    WARNING: Low space"
+for point in "$FOUND_SYSTEM" "$FOUND_PRODUCT" "$FOUND_SYSTEM_EXT"; do
+    if [ -n "$point" ] && [ -d "$point" ]; then
+        FREE=$(df -k "$point" 2>/dev/null | tail -1 | awk '{print $4}')
+        if [ -n "$FREE" ]; then
+            ui_print "  -> $point: ${FREE}KB free"
+            log "  $point: ${FREE}KB free"
+            if [ "$FREE" -lt 51200 ] 2>/dev/null; then
+                ui_print "    WARNING: Low space on $point"
+                log "    WARNING: Low space"
+            fi
+        fi
     fi
 done
 
@@ -103,10 +206,6 @@ if [ -f "delete.list" ]; then
     DELETE_COUNT=$(wc -l < /tmp/delete.list)
     log "  Found $DELETE_COUNT items to remove"
     ui_print "  Found $DELETE_COUNT items to remove"
-    log "  Delete list preview:"
-    head -5 /tmp/delete.list | while IFS= read -r line; do
-        log "    $line"
-    done
 else
     touch /tmp/delete.list
     log "  WARNING: delete.list not found in ZIP!"
@@ -118,6 +217,64 @@ log "Step 4/6: Removing GAPPS files"
 ui_print " "
 ui_print "Step 4/6: Removing GAPPS files"
 
+# Function to find and delete a file/directory
+delete_item() {
+    local target="$1"
+    local found=0
+    
+    # List of possible base paths to search
+    local bases="$FOUND_SYSTEM $FOUND_PRODUCT $FOUND_SYSTEM_EXT $SYSTEM_ROOT_MOUNT /system /system_root"
+    
+    for base in $bases; do
+        if [ -z "$base" ]; then
+            continue
+        fi
+        
+        # Remove leading slash from target for path joining
+        local clean_target="${target#/}"
+        
+        # Try different path combinations
+        local paths_to_try="$base/$clean_target"
+        
+        # If target starts with /product, try replacing with system/product
+        if echo "$target" | grep -q '^/product/'; then
+            local sub_path="${target#/product/}"
+            paths_to_try="$paths_to_try $base/product/$sub_path"
+        fi
+        
+        # If target starts with /system_ext, try replacing with system/system_ext
+        if echo "$target" | grep -q '^/system_ext/'; then
+            local sub_path="${target#/system_ext/}"
+            paths_to_try="$paths_to_try $base/system_ext/$sub_path"
+        fi
+        
+        # If target starts with /system/, try without system prefix
+        if echo "$target" | grep -q '^/system/'; then
+            local sub_path="${target#/system/}"
+            paths_to_try="$paths_to_try $base/$sub_path"
+        fi
+        
+        for full_path in $paths_to_try; do
+            if [ -d "$full_path" ]; then
+                rm -rf "$full_path"
+                if [ ! -d "$full_path" ]; then
+                    log "  [DELETED] $full_path/ (directory)"
+                    return 2
+                fi
+            elif [ -f "$full_path" ]; then
+                rm -f "$full_path"
+                if [ ! -f "$full_path" ]; then
+                    log "  [DELETED] $full_path"
+                    return 1
+                fi
+            fi
+        done
+    done
+    
+    log "  [NOT FOUND] $target (searched in: $bases)"
+    return 0
+}
+
 if [ -s "/tmp/delete.list" ]; then
     DELETED_FILES=0
     DELETED_DIRS=0
@@ -125,29 +282,17 @@ if [ -s "/tmp/delete.list" ]; then
     
     while IFS= read -r path; do
         if [ -n "$path" ]; then
-            if [ -f "$path" ]; then
-                rm -f "$path"
-                if [ ! -f "$path" ]; then
-                    DELETED_FILES=$((DELETED_FILES + 1))
-                    log "  [DELETED] $path"
-                    ui_print "  [DELETED] $path"
-                else
-                    log "  [FAILED] $path"
-                    ui_print "  [FAILED] $path"
-                fi
-            elif [ -d "$path" ]; then
-                rm -rf "$path"
-                if [ ! -d "$path" ]; then
-                    DELETED_DIRS=$((DELETED_DIRS + 1))
-                    log "  [DELETED] $path/ (directory)"
-                    ui_print "  [DELETED] $path/ (directory)"
-                else
-                    log "  [FAILED] $path/ (directory)"
-                    ui_print "  [FAILED] $path/ (directory)"
-                fi
+            delete_item "$path"
+            RESULT=$?
+            
+            if [ $RESULT -eq 1 ]; then
+                DELETED_FILES=$((DELETED_FILES + 1))
+                ui_print "  [DELETED] $path"
+            elif [ $RESULT -eq 2 ]; then
+                DELETED_DIRS=$((DELETED_DIRS + 1))
+                ui_print "  [DELETED] $path/ (directory)"
             else
                 NOT_FOUND=$((NOT_FOUND + 1))
-                log "  [NOT FOUND] $path"
                 ui_print "  [NOT FOUND] $path"
             fi
         fi
@@ -157,9 +302,7 @@ if [ -s "/tmp/delete.list" ]; then
     log "  Summary:"
     log "    Files deleted: $DELETED_FILES"
     log "    Directories deleted: $DELETED_DIRS"
-    if [ $NOT_FOUND -gt 0 ]; then
-        log "    Not found: $NOT_FOUND"
-    fi
+    log "    Not found: $NOT_FOUND"
     
     ui_print " "
     ui_print "  Summary:"
@@ -194,11 +337,21 @@ TOTAL_FAILED=0
 
 for dir in system system_ext product; do
     if [ -d "$TMPDIR/$dir" ]; then
-        MOUNT_POINT="/$dir"
+        case $dir in
+            system) MOUNT_POINT="$FOUND_SYSTEM" ;;
+            system_ext) MOUNT_POINT="$FOUND_SYSTEM_EXT" ;;
+            product) MOUNT_POINT="$FOUND_PRODUCT" ;;
+        esac
+        
+        if [ -z "$MOUNT_POINT" ]; then
+            log "  Skipping $dir: no mount point"
+            continue
+        fi
+        
         RESTORED=0
         FAILED=0
         
-        log "  -> Restoring $dir..."
+        log "  -> Restoring $dir to $MOUNT_POINT..."
         ui_print "  -> Restoring $dir..."
         
         cd "$TMPDIR/$dir"
