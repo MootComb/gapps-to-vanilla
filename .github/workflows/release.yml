@@ -57,7 +57,19 @@ jobs:
         id: fetch_all
         run: |
           mkdir -p ${{ env.WORK_DIR }}
-          curl -fsSL "${{ steps.set_api.outputs.api_url }}" -o "${{ env.WORK_DIR }}/releases.json"
+          
+          # Retry curl up to 5 times
+          for i in 1 2 3 4 5; do
+            echo "Attempt $i: Fetching releases..."
+            curl -fsSL --retry 3 --retry-delay 5 "${{ steps.set_api.outputs.api_url }}" -o "${{ env.WORK_DIR }}/releases.json" && break
+            echo "Retrying in 10 seconds..."
+            sleep 10
+          done
+          
+          if [[ ! -s "${{ env.WORK_DIR }}/releases.json" ]]; then
+            echo "::error::Failed to fetch releases after 5 attempts"
+            exit 1
+          fi
           
           COUNT="${{ github.event.inputs.count }}"
           
@@ -114,7 +126,6 @@ jobs:
           PROCESSED=0
           SKIPPED=0
           ZIP_LIST=""
-          ROM_NAME=""
           
           while IFS= read -r release_tag; do
             echo ""
@@ -138,17 +149,18 @@ jobs:
             RELEASE_DATE=$(echo "$RELEASE_DATA" | jq -r '.published_at' | cut -d'T' -f1)
             CLEAN_NAME=$(echo "$RELEASE_NAME" | sed 's/ | TREBLE GSI OFFICIAL-signed//')
             
-            # Extract ROM name (Infinity X)
-            if [[ -z "$ROM_NAME" ]]; then
-              ROM_NAME=$(echo "$RELEASE_NAME" | grep -oP '^[^0-9]+' | sed 's/ *$//')
-            fi
-            
             echo "Release: $CLEAN_NAME (v$VERSION_NUM, $RELEASE_DATE)"
             
             echo "  Downloading..."
             mkdir -p ${{ env.WORK_DIR }}/downloads/$release_tag
-            curl -fL --retry 3 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/$release_tag/vanilla.img.xz" "$VANILLA_URL" 2>/dev/null
-            curl -fL --retry 3 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/$release_tag/gapps.img.xz" "$GAPPS_URL" 2>/dev/null
+            for i in 1 2 3; do
+              curl -fL --retry 3 --retry-delay 5 -o "${{ env.WORK_DIR }}/downloads/$release_tag/vanilla.img.xz" "$VANILLA_URL" 2>/dev/null && break
+              sleep 5
+            done
+            for i in 1 2 3; do
+              curl -fL --retry 3 --retry-delay 5 -o "${{ env.WORK_DIR }}/downloads/$release_tag/gapps.img.xz" "$GAPPS_URL" 2>/dev/null && break
+              sleep 5
+            done
             
             echo "  Extracting..."
             mkdir -p ${{ env.WORK_DIR }}/extracted/$release_tag/vanilla
@@ -218,11 +230,7 @@ jobs:
             cp "${{ github.workspace }}/scripts/updater-script" "$ZIP_DIR/META-INF/com/google/android/updater-script"
             chmod +x "$ZIP_DIR/META-INF/com/google/android/update-binary"
             
-            if [[ -n "$VERSION_NUM" ]]; then
-              ZIP_NAME="gapps-to-vanilla_infinityX-${VERSION_NUM}.zip"
-            else
-              ZIP_NAME="gapps-to-vanilla-${release_tag}.zip"
-            fi
+            ZIP_NAME="gapps-to-vanilla-${release_tag}.zip"
             
             cd "$ZIP_DIR"
             zip -r "${{ env.WORK_DIR }}/output/${ZIP_NAME}" . -x "*.git*" > /dev/null 2>&1
@@ -248,13 +256,11 @@ jobs:
           echo "  Skipped: $SKIPPED"
           
           GENERATED_DATE=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
-          RELEASE_TITLE="gapps-to-vanilla ${ROM_NAME} - ${PROCESSED} versions"
           
           echo "processed=$PROCESSED" >> $GITHUB_OUTPUT
           echo "skipped=$SKIPPED" >> $GITHUB_OUTPUT
           echo "generated_date=$GENERATED_DATE" >> $GITHUB_OUTPUT
           echo "release_tag_name=$RELEASE_TAG_NAME" >> $GITHUB_OUTPUT
-          echo "release_title=$RELEASE_TITLE" >> $GITHUB_OUTPUT
           
           echo "zip_list<<ZIPLISTEOF" >> $GITHUB_OUTPUT
           echo "$ZIP_LIST" >> $GITHUB_OUTPUT
@@ -272,9 +278,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.process_releases.outputs.release_tag_name }}
-          name: ${{ steps.process_releases.outputs.release_title }}
+          name: "gapps-to-vanilla - ${{ steps.process_releases.outputs.processed }} versions"
           body: |
-            ## gapps-to-vanilla ${{ steps.process_releases.outputs.processed }} versions
+            ## gapps-to-vanilla
             
             **Source:** ${{ steps.set_api.outputs.api_url }}
             **Generated:** ${{ steps.process_releases.outputs.generated_date }}
@@ -295,10 +301,11 @@ jobs:
 
       - name: Display summary
         run: |
-          echo "## gapps-to-vanilla ${{ steps.process_releases.outputs.processed }} versions" >> $GITHUB_STEP_SUMMARY
+          echo "## gapps-to-vanilla" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Source:** ${{ steps.set_api.outputs.api_url }}" >> $GITHUB_STEP_SUMMARY
           echo "**Generated:** ${{ steps.process_releases.outputs.generated_date }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Versions:** ${{ steps.process_releases.outputs.processed }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Downloads" >> $GITHUB_STEP_SUMMARY
           echo "${{ steps.process_releases.outputs.zip_list }}" >> $GITHUB_STEP_SUMMARY
