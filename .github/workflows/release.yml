@@ -1,4 +1,4 @@
-name: release
+name: RELEASE - Batch gapps-to-vanilla Generator
 
 on:
   workflow_dispatch:
@@ -103,6 +103,12 @@ jobs:
       - name: Process each release
         id: process_releases
         run: |
+          RELEASE_TAG_NAME="gapps-to-vanilla-${{ github.run_id }}"
+          
+          # Get repo path from API URL
+          API_URL="${{ steps.set_api.outputs.api_url }}"
+          REPO_PATH=$(echo "$API_URL" | sed 's|https://api.github.com/repos/||' | sed 's|/releases||')
+          
           mkdir -p ${{ env.WORK_DIR }}/output
           rm -f ${{ env.WORK_DIR }}/output/*.zip
           
@@ -130,7 +136,9 @@ jobs:
             
             VERSION_NUM=$(echo "$RELEASE_NAME" | grep -oP '[0-9]+\.[0-9]+' | head -1)
             RELEASE_DATE=$(echo "$RELEASE_DATA" | jq -r '.published_at' | cut -d'T' -f1)
-            echo "Release: $RELEASE_NAME (v$VERSION_NUM, $RELEASE_DATE)"
+            CLEAN_NAME=$(echo "$RELEASE_NAME" | sed 's/ | TREBLE GSI OFFICIAL-signed//')
+            
+            echo "Release: $CLEAN_NAME (v$VERSION_NUM, $RELEASE_DATE)"
             
             echo "  Downloading..."
             mkdir -p ${{ env.WORK_DIR }}/downloads/$release_tag
@@ -217,7 +225,7 @@ jobs:
             ZIP_SIZE=$(du -h "${{ env.WORK_DIR }}/output/${ZIP_NAME}" | cut -f1)
             echo "  Done: ${ZIP_NAME} (${ZIP_SIZE})"
             
-            ZIP_LIST="${ZIP_LIST}- ${ZIP_NAME} (${ZIP_SIZE}) — ${RELEASE_NAME} (${RELEASE_DATE})
+            ZIP_LIST="${ZIP_LIST}- [${ZIP_NAME}](https://github.com/${REPO_PATH}/releases/download/${RELEASE_TAG_NAME}/${ZIP_NAME}) (${ZIP_SIZE}) — ${CLEAN_NAME} (${RELEASE_DATE})
           "
             
             PROCESSED=$((PROCESSED + 1))
@@ -233,12 +241,13 @@ jobs:
           echo "Batch complete!"
           echo "  Processed: $PROCESSED"
           echo "  Skipped: $SKIPPED"
-          echo ""
-          echo "Generated ZIPs:"
-          ls -lh ${{ env.WORK_DIR }}/output/
+          
+          GENERATED_DATE=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
           
           echo "processed=$PROCESSED" >> $GITHUB_OUTPUT
           echo "skipped=$SKIPPED" >> $GITHUB_OUTPUT
+          echo "generated_date=$GENERATED_DATE" >> $GITHUB_OUTPUT
+          echo "release_tag_name=$RELEASE_TAG_NAME" >> $GITHUB_OUTPUT
           
           echo "zip_list<<ZIPLISTEOF" >> $GITHUB_OUTPUT
           echo "$ZIP_LIST" >> $GITHUB_OUTPUT
@@ -255,43 +264,35 @@ jobs:
         if: ${{ github.event.inputs.create_release == 'true' && steps.process_releases.outputs.processed > 0 }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: gapps-to-vanilla-${{ github.run_id }}
+          tag_name: ${{ steps.process_releases.outputs.release_tag_name }}
           name: "gapps-to-vanilla - ${{ steps.process_releases.outputs.processed }} versions"
           body: |
             ## gapps-to-vanilla Batch Release
             
             **Source:** ${{ steps.set_api.outputs.api_url }}
-            **Generated:** ${{ env.GENERATED_DATE }}
-            **Versions processed:** ${{ steps.process_releases.outputs.processed }}
+            **Generated:** ${{ steps.process_releases.outputs.generated_date }}
+            **Versions:** ${{ steps.process_releases.outputs.processed }}
             
-            ### Included ZIPs:
+            ### Downloads
+            
             ${{ steps.process_releases.outputs.zip_list }}
             
             ### Instructions
-            1. Download the ZIP matching your GSI version
-            2. Boot into TWRP/OrangeFox recovery
-            3. Flash the ZIP
-            4. Reboot system
             
-            ### What it does
-            - Removes all GAPPS files and directories
-            - Restores VANILLA AOSP files
-            - Preserves build.prop
+            1. Download the ZIP for your version
+            2. Flash via TWRP/OrangeFox recovery
+            3. Reboot system
           files: ${{ env.WORK_DIR }}/output/*
           draft: false
           prerelease: false
-        env:
-          GENERATED_DATE: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
       - name: Display summary
         run: |
           echo "## Batch Generation Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Source:** ${{ steps.set_api.outputs.api_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Generated:** ${{ steps.process_releases.outputs.generated_date }}" >> $GITHUB_STEP_SUMMARY
           echo "**Processed:** ${{ steps.process_releases.outputs.processed }} versions" >> $GITHUB_STEP_SUMMARY
-          echo "**Skipped:** ${{ steps.process_releases.outputs.skipped }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Generated ZIPs:" >> $GITHUB_STEP_SUMMARY
-          ls -lh ${{ env.WORK_DIR }}/output/*.zip | while read -r line; do
-            echo "- $line" >> $GITHUB_STEP_SUMMARY
-          done
+          echo "### Downloads" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.process_releases.outputs.zip_list }}" >> $GITHUB_STEP_SUMMARY
