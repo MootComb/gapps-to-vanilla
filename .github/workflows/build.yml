@@ -137,11 +137,6 @@ jobs:
           diff -qr vanilla gapps 2>&1 | \
             grep -v 'No such file or directory' > ${{ env.WORK_DIR }}/full_diff_raw.txt || true
           
-          # Clean up paths:
-          # 1. Remove "system/product/" -> "product/" (symlink duplicate)
-          # 2. Remove "system/system_ext/" -> "system_ext/" (symlink duplicate)
-          # 3. Keep only system/, system_ext/, product/
-          # 4. Exclude build.prop
           cat ${{ env.WORK_DIR }}/full_diff_raw.txt | \
             sed 's|system/product/|product/|g' | \
             sed 's|system/system_ext/|system_ext/|g' | \
@@ -149,7 +144,6 @@ jobs:
             grep -v 'build\.prop' | \
             sort -u > ${{ env.WORK_DIR }}/filtered_diff.txt || true
           
-          # Create clean full diff
           cat ${{ env.WORK_DIR }}/full_diff_raw.txt | \
             grep -v '^diff:' | sort -u > ${{ env.WORK_DIR }}/full_diff.txt || true
           
@@ -194,15 +188,12 @@ jobs:
           
           echo "=== PARSING FILTERED DIFF ==="
           
-          # 1. Directories only in GAPPS -> DELETE
           grep '^Only in gapps' ${{ env.WORK_DIR }}/filtered_diff.txt | \
             sed 's|^Only in gapps/||' | sed 's|: |/|' | sort -u > ${{ env.WORK_DIR }}/gapps_only.txt
           
-          # 2. Directories/Files only in VANILLA -> RESTORE
           grep '^Only in vanilla' ${{ env.WORK_DIR }}/filtered_diff.txt | \
             sed 's|^Only in vanilla/||' | sed 's|: |/|' | sort -u > ${{ env.WORK_DIR }}/vanilla_only.txt
           
-          # 3. Files that DIFFER -> REPLACE
           grep '^Files.*differ' ${{ env.WORK_DIR }}/filtered_diff.txt | \
             sed 's|^Files vanilla/||' | sed 's| and .* differ||' | sort -u > ${{ env.WORK_DIR }}/differ.txt
           
@@ -210,21 +201,18 @@ jobs:
           echo "To RESTORE: $(wc -l < ${{ env.WORK_DIR }}/vanilla_only.txt) entries"
           echo "To REPLACE: $(wc -l < ${{ env.WORK_DIR }}/differ.txt) entries"
           
-          # RESTORE vanilla-only items (could be files or directories)
           echo ""
           echo "=== RESTORING VANILLA-ONLY ITEMS ==="
           VANILLA_COUNT=0
           while IFS= read -r item; do
             if [[ -n "$item" ]]; then
               if [[ -f "vanilla/$item" ]]; then
-                # It's a file
                 TARGET_DIR="$ZIP_DIR/$(dirname "$item")"
                 mkdir -p "$TARGET_DIR"
                 cp "vanilla/$item" "$ZIP_DIR/$item"
                 VANILLA_COUNT=$((VANILLA_COUNT + 1))
                 echo "  + [FILE] $item"
               elif [[ -d "vanilla/$item" ]]; then
-                # It's a directory - copy entire contents
                 TARGET_DIR="$ZIP_DIR/$item"
                 mkdir -p "$TARGET_DIR"
                 cp -r "vanilla/$item/"* "$TARGET_DIR/" 2>/dev/null || true
@@ -237,7 +225,6 @@ jobs:
             fi
           done < ${{ env.WORK_DIR }}/vanilla_only.txt
           
-          # REPLACE different files
           echo ""
           echo "=== REPLACING DIFFERENT FILES ==="
           DIFF_COUNT=0
@@ -253,7 +240,6 @@ jobs:
             fi
           done < ${{ env.WORK_DIR }}/differ.txt
           
-          # CREATE delete list
           echo ""
           echo "=== CREATING DELETE LIST ==="
           while IFS= read -r item; do
@@ -264,18 +250,11 @@ jobs:
           DELETE_COUNT=$(wc -l < "$ZIP_DIR/delete.list" 2>/dev/null || echo 0)
           echo "Delete list: $DELETE_COUNT entries"
           
-          # Show ZIP structure
-          echo ""
-          echo "=== ZIP STRUCTURE (first 50 files) ==="
-          find "$ZIP_DIR" -type f -not -path "*/META-INF/*" | head -50
-          
-          # META-INF
           mkdir -p "$ZIP_DIR/META-INF/com/google/android"
           cp "${{ github.workspace }}/scripts/update-binary" "$ZIP_DIR/META-INF/com/google/android/update-binary"
           cp "${{ github.workspace }}/scripts/updater-script" "$ZIP_DIR/META-INF/com/google/android/updater-script"
           chmod +x "$ZIP_DIR/META-INF/com/google/android/update-binary"
           
-          # Create ZIP
           RELEASE_TAG="${{ steps.fetch.outputs.release_tag }}"
           ZIP_NAME="gapps-to-vanilla-${RELEASE_TAG}.zip"
           
@@ -310,6 +289,7 @@ jobs:
         with:
           name: ${{ steps.generate_zip.outputs.zip_name }}
           path: ${{ steps.generate_zip.outputs.zip_path }}
+          compression-level: 0
           retention-days: 30
 
       - name: Display summary
