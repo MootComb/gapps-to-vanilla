@@ -72,12 +72,9 @@ jobs:
               version: (.name | capture("(?<v>[0-9]+\\.[0-9]+)") | .v // "0.0")
             }) |
             map(select(.version != null and .version != "0.0")) |
-            # For each version, keep only the latest by date
             group_by(.version) |
             map(sort_by(.date) | reverse | .[0]) |
-            # Sort by version number descending (3.11 > 3.10 > 3.9 > 3.1)
             sort_by(.version | split(".") | map(tonumber? // 0)) | reverse |
-            # Take top N
             .[:($count|tonumber)] |
             .[].tag
           ' "${{ env.WORK_DIR }}/releases.json")
@@ -111,6 +108,7 @@ jobs:
           
           PROCESSED=0
           SKIPPED=0
+          ZIP_LIST=""
           
           while IFS= read -r release_tag; do
             echo ""
@@ -130,28 +128,29 @@ jobs:
               continue
             fi
             
-            echo "Release: $RELEASE_NAME"
+            VERSION_NUM=$(echo "$RELEASE_NAME" | grep -oP '[0-9]+\.[0-9]+' | head -1)
+            echo "Release: $RELEASE_NAME (v$VERSION_NUM)"
             
             echo "  Downloading..."
             mkdir -p ${{ env.WORK_DIR }}/downloads/$release_tag
             curl -fL --retry 3 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/$release_tag/vanilla.img.xz" "$VANILLA_URL" 2>/dev/null
             curl -fL --retry 3 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/$release_tag/gapps.img.xz" "$GAPPS_URL" 2>/dev/null
             
-            echo "  Extracting VANILLA..."
+            echo "  Extracting..."
             mkdir -p ${{ env.WORK_DIR }}/extracted/$release_tag/vanilla
+            mkdir -p ${{ env.WORK_DIR }}/extracted/$release_tag/gapps
+            
             xz -d "${{ env.WORK_DIR }}/downloads/$release_tag/vanilla.img.xz" 2>/dev/null
             set +e
             7z x "${{ env.WORK_DIR }}/downloads/$release_tag/vanilla.img" -o"${{ env.WORK_DIR }}/extracted/$release_tag/vanilla" > /dev/null 2>&1
             set -e
             
-            echo "  Extracting GAPPS..."
-            mkdir -p ${{ env.WORK_DIR }}/extracted/$release_tag/gapps
             xz -d "${{ env.WORK_DIR }}/downloads/$release_tag/gapps.img.xz" 2>/dev/null
             set +e
             7z x "${{ env.WORK_DIR }}/downloads/$release_tag/gapps.img" -o"${{ env.WORK_DIR }}/extracted/$release_tag/gapps" > /dev/null 2>&1
             set -e
             
-            echo "  Comparing images..."
+            echo "  Comparing..."
             cd ${{ env.WORK_DIR }}/extracted/$release_tag
             diff -qr vanilla gapps 2>&1 | grep -v 'No such file or directory' > full_diff_raw.txt || true
             
@@ -205,12 +204,20 @@ jobs:
             cp "${{ github.workspace }}/scripts/updater-script" "$ZIP_DIR/META-INF/com/google/android/updater-script"
             chmod +x "$ZIP_DIR/META-INF/com/google/android/update-binary"
             
-            ZIP_NAME="gapps-to-vanilla-${release_tag}.zip"
+            if [[ -n "$VERSION_NUM" ]]; then
+              ZIP_NAME="gapps-to-vanilla_infinityX-${VERSION_NUM}_${release_tag}.zip"
+            else
+              ZIP_NAME="gapps-to-vanilla-${release_tag}.zip"
+            fi
+            
             cd "$ZIP_DIR"
             zip -r "${{ env.WORK_DIR }}/output/${ZIP_NAME}" . -x "*.git*" > /dev/null 2>&1
             
             ZIP_SIZE=$(du -h "${{ env.WORK_DIR }}/output/${ZIP_NAME}" | cut -f1)
             echo "  Done: ${ZIP_NAME} (${ZIP_SIZE})"
+            
+            ZIP_LIST="$ZIP_LIST  - ${ZIP_NAME} (${ZIP_SIZE}) — $RELEASE_NAME
+          "
             
             PROCESSED=$((PROCESSED + 1))
             
@@ -231,17 +238,12 @@ jobs:
           
           echo "processed=$PROCESSED" >> $GITHUB_OUTPUT
           echo "skipped=$SKIPPED" >> $GITHUB_OUTPUT
+          
+          echo "zip_list<<ZIPLISTEOF" >> $GITHUB_OUTPUT
+          echo "$ZIP_LIST" >> $GITHUB_OUTPUT
+          echo "ZIPLISTEOF" >> $GITHUB_OUTPUT
 
-      - name: Upload each ZIP as individual artifact
-        run: |
-          mkdir -p ${{ env.WORK_DIR }}/artifacts
-          for zip_file in ${{ env.WORK_DIR }}/output/*.zip; do
-            zip_name=$(basename "$zip_file" .zip)
-            mkdir -p "${{ env.WORK_DIR }}/artifacts/$zip_name"
-            cp "$zip_file" "${{ env.WORK_DIR }}/artifacts/$zip_name/"
-          done
-
-      - name: Upload all ZIPs as artifacts
+      - name: Upload all ZIPs as artifact
         uses: actions/upload-artifact@v4
         with:
           name: all-gapps-to-vanilla-zips
@@ -257,12 +259,12 @@ jobs:
           body: |
             ## gapps-to-vanilla Batch Release
             
-            **Generated:** $(date -u)
             **Source:** ${{ steps.set_api.outputs.api_url }}
+            **Generated:** ${{ env.GENERATED_DATE }}
             **Versions processed:** ${{ steps.process_releases.outputs.processed }}
             
             ### Included ZIPs:
-            $(ls -lh ${{ env.WORK_DIR }}/output/*.zip | while read -r line; do echo "- $line"; done)
+            ${{ steps.process_releases.outputs.zip_list }}
             
             ### Instructions
             1. Download the ZIP matching your GSI version
@@ -277,6 +279,8 @@ jobs:
           files: ${{ env.WORK_DIR }}/output/*
           draft: false
           prerelease: false
+        env:
+          GENERATED_DATE: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
       - name: Display summary
         run: |
@@ -287,10 +291,6 @@ jobs:
           echo "**Skipped:** ${{ steps.process_releases.outputs.skipped }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Generated ZIPs:" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          ls -lh ${{ env.WORK_DIR }}/output/ >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Download" >> $GITHUB_STEP_SUMMARY
-          echo "- **All ZIPs:** Check the Release or Artifacts section" >> $GITHUB_STEP_SUMMARY
-          echo "- **Individual:** Each ZIP is also available as separate artifact" >> $GITHUB_STEP_SUMMARY
+          ls -lh ${{ env.WORK_DIR }}/output/*.zip | while read -r line; do
+            echo "- $line" >> $GITHUB_STEP_SUMMARY
+          done
