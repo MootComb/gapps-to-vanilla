@@ -65,7 +65,6 @@ jobs:
           
           RELEASES=$(jq -r --arg count "$COUNT" '
             [.[] | select(.assets | map(.name) | join(",") | test("VANILLA"; "i") and test("GAPPS"; "i"))] |
-            sort_by(.published_at) | reverse |
             map({
               tag: .tag_name,
               name: .name,
@@ -73,10 +72,13 @@ jobs:
               version: (.name | capture("(?<v>[0-9]+\\.[0-9]+)") | .v // "0.0")
             }) |
             map(select(.version != null and .version != "0.0")) |
+            # For each version, keep only the latest by date
+            group_by(.version) |
+            map(sort_by(.date) | reverse | .[0]) |
+            # Sort by version number descending (3.11 > 3.10 > 3.9 > 3.1)
             sort_by(.version | split(".") | map(tonumber? // 0)) | reverse |
-            unique_by(.version) |
+            # Take top N
             .[:($count|tonumber)] |
-            sort_by(.date) | reverse |
             .[].tag
           ' "${{ env.WORK_DIR }}/releases.json")
           
