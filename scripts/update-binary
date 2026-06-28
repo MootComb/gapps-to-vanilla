@@ -36,8 +36,10 @@ for point in $SYSTEM_MOUNT $PRODUCT_MOUNT $SYSTEM_EXT_MOUNT; do
     
     if mount | grep -q " $point "; then
         mount -o remount,rw $point 2>/dev/null
+        ui_print "    Remounted as RW"
     else
         mount -o rw $point 2>/dev/null
+        ui_print "    Mounted as RW"
     fi
     
     if ! touch $point/.test 2>/dev/null; then
@@ -47,7 +49,7 @@ for point in $SYSTEM_MOUNT $PRODUCT_MOUNT $SYSTEM_EXT_MOUNT; do
         fi
     fi
     rm -f $point/.test
-    ui_print "    [OK] $point mounted"
+    ui_print "    [OK] $point writable"
 done
 
 ui_print " "
@@ -67,65 +69,131 @@ rm -rf $TMPDIR
 mkdir -p $TMPDIR
 cd $TMPDIR
 
-# Extract only delete.list first
 unzip -o "$ZIPFILE" 'delete.list' -d . > /dev/null 2>&1
 if [ -f "delete.list" ]; then
     cp delete.list /tmp/delete.list
     DELETE_COUNT=$(wc -l < /tmp/delete.list)
     ui_print "  Found $DELETE_COUNT items to remove"
+    ui_print "  First 5 items:"
+    head -5 /tmp/delete.list | while IFS= read -r line; do
+        ui_print "    $line"
+    done
 else
     touch /tmp/delete.list
-    ui_print "  No items to remove"
+    ui_print "  WARNING: delete.list not found in ZIP!"
 fi
 
 ui_print " "
 ui_print "Step 4/6: Removing GAPPS files"
 if [ -s "/tmp/delete.list" ]; then
-    DELETED=0
+    DELETED_FILES=0
+    DELETED_DIRS=0
+    NOT_FOUND=0
+    
     while IFS= read -r path; do
         if [ -n "$path" ]; then
             if [ -f "$path" ]; then
                 rm -f "$path"
-                DELETED=$((DELETED + 1))
+                if [ ! -f "$path" ]; then
+                    DELETED_FILES=$((DELETED_FILES + 1))
+                    ui_print "  [DELETED] $path"
+                else
+                    ui_print "  [FAILED] $path"
+                fi
             elif [ -d "$path" ]; then
                 rm -rf "$path"
-                DELETED=$((DELETED + 1))
+                if [ ! -d "$path" ]; then
+                    DELETED_DIRS=$((DELETED_DIRS + 1))
+                    ui_print "  [DELETED] $path/ (directory)"
+                else
+                    ui_print "  [FAILED] $path/ (directory)"
+                fi
+            else
+                NOT_FOUND=$((NOT_FOUND + 1))
+                if [ $NOT_FOUND -le 10 ]; then
+                    ui_print "  [NOT FOUND] $path"
+                fi
             fi
         fi
     done < "/tmp/delete.list"
-    ui_print "  Removed $DELETED items"
+    
+    ui_print " "
+    ui_print "  Summary:"
+    ui_print "    Files deleted: $DELETED_FILES"
+    ui_print "    Directories deleted: $DELETED_DIRS"
+    if [ $NOT_FOUND -gt 0 ]; then
+        ui_print "    Not found: $NOT_FOUND"
+    fi
 else
     ui_print "  Nothing to remove"
 fi
 
 ui_print " "
-ui_print "Step 5/6: Extracting and restoring VANILLA files"
+ui_print "Step 5/6: Extracting VANILLA files from ZIP"
 cd $TMPDIR
 
-# Extract only system, system_ext, product from ZIP
 unzip -o "$ZIPFILE" 'system/*' 'system_ext/*' 'product/*' -d . > /dev/null 2>&1
-EXTRACT_COUNT=$(find system system_ext product -type f 2>/dev/null | wc -l)
-ui_print "  Extracted $EXTRACT_COUNT files"
+
+ui_print "  ZIP contents:"
+for dir in system system_ext product; do
+    if [ -d "$dir" ]; then
+        COUNT=$(find $dir -type f 2>/dev/null | wc -l)
+        ui_print "    $dir/: $COUNT files"
+    else
+        ui_print "    $dir/: empty"
+    fi
+done
+
+ui_print " "
+ui_print "  Restoring files to partitions..."
+TOTAL_RESTORED=0
 
 for dir in system system_ext product; do
     if [ -d "$TMPDIR/$dir" ]; then
         MOUNT_POINT="/$dir"
-        ui_print "  -> Restoring $dir..."
+        COUNT=0
+        
         cd "$TMPDIR/$dir"
         find . -type f | while IFS= read -r file; do
             TARGET="$MOUNT_POINT/${file#./}"
             TARGET_DIR=$(dirname "$TARGET")
             mkdir -p "$TARGET_DIR"
-            cp -f "$file" "$TARGET"
-            chmod --reference="$file" "$TARGET" 2>/dev/null || chmod 644 "$TARGET"
+            
+            if cp -f "$file" "$TARGET"; then
+                chmod --reference="$file" "$TARGET" 2>/dev/null || chmod 644 "$TARGET"
+                echo "RESTORED:$file" >> /tmp/restore_log.txt
+            else
+                echo "FAILED:$file" >> /tmp/restore_log.txt
+            fi
         done
-        ui_print "    $dir restored"
+        
+        # Count restored files
+        if [ -f /tmp/restore_log.txt ]; then
+            RESTORED=$(grep -c '^RESTORED:' /tmp/restore_log.txt)
+            FAILED=$(grep -c '^FAILED:' /tmp/restore_log.txt)
+            TOTAL_RESTORED=$((TOTAL_RESTORED + RESTORED))
+            
+            ui_print "    $dir: $RESTORED restored"
+            if [ $FAILED -gt 0 ]; then
+                ui_print "    $dir: $FAILED FAILED!"
+                grep '^FAILED:' /tmp/restore_log.txt | head -5 | while IFS= read -r line; do
+                    ui_print "      FAILED: $(echo $line | cut -d: -f2)"
+                done
+            fi
+            
+            # Show first 5 restored files as example
+            grep '^RESTORED:' /tmp/restore_log.txt | head -5 | while IFS= read -r line; do
+                ui_print "      + $(echo $line | cut -d: -f2)"
+            done
+            
+            rm -f /tmp/restore_log.txt
+        fi
     fi
 done
 
 ui_print " "
 ui_print "Step 6/6: Cleanup"
-rm -rf /tmp/gapps_to_vanilla /tmp/delete.list
+rm -rf /tmp/gapps_to_vanilla /tmp/delete.list /tmp/restore_log.txt
 
 ui_print " "
 ui_print "========================================="
