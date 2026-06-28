@@ -1,4 +1,4 @@
-name: RELEASE - Batch gapps-to-vanilla Generator
+name: release
 
 on:
   workflow_dispatch:
