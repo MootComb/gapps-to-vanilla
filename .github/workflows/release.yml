@@ -1,0 +1,257 @@
+name: RELEASE - Batch gapps-to-vanilla Generator
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_api_url:
+        description: 'GitHub API URL for releases (leave empty for default)'
+        required: false
+        type: string
+        default: ''
+      count:
+        description: 'Number of unique versions to process (default: 5)'
+        required: false
+        type: string
+        default: '5'
+
+env:
+  DEFAULT_API_URL: "https://api.github.com/repos/Doze-off/ProjectInfinity-X_gsi/releases"
+  WORK_DIR: ${{ github.workspace }}/gsi_work
+
+permissions:
+  contents: read
+
+jobs:
+  batch_generate:
+    name: Generate ZIPs for unique versions
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            scripts/*
+          sparse-checkout-cone-mode: false
+
+      - name: Set API URL
+        id: set_api
+        run: |
+          if [[ -n "${{ github.event.inputs.source_api_url }}" ]]; then
+            echo "api_url=${{ github.event.inputs.source_api_url }}" >> $GITHUB_OUTPUT
+          else
+            echo "api_url=${{ env.DEFAULT_API_URL }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xz-utils p7zip-full jq curl zip
+
+      - name: Fetch all releases and select unique versions
+        id: fetch_all
+        run: |
+          mkdir -p ${{ env.WORK_DIR }}
+          curl -fsSL "${{ steps.set_api.outputs.api_url }}" -o "${{ env.WORK_DIR }}/releases.json"
+          
+          COUNT="${{ github.event.inputs.count }}"
+          
+          echo "Selecting $COUNT unique versions..."
+          
+          # Get UNIQUE releases by version number in name
+          # Example: "Infinity X 3.9 | A16 QPR2 | ..." -> version "3.9"
+          RELEASES=$(jq -r --arg count "$COUNT" '
+            [.[] | select(.assets | map(.name) | join(",") | test("VANILLA"; "i") and test("GAPPS"; "i"))] |
+            sort_by(.published_at) | reverse |
+            map({
+              tag: .tag_name,
+              name: .name,
+              version: (.name | capture("(?<v>[0-9]+\\.[0-9]+)") | .v)
+            }) |
+            unique_by(.version) |
+            .[:($count|tonumber)] |
+            .[].tag
+          ' "${{ env.WORK_DIR }}/releases.json")
+          
+          if [[ -z "$RELEASES" ]]; then
+            echo "Version extraction failed, falling back to latest $COUNT releases"
+            RELEASES=$(jq -r --arg count "$COUNT" '
+              [.[] | select(.assets | map(.name) | join(",") | test("VANILLA"; "i") and test("GAPPS"; "i"))] |
+              sort_by(.published_at) | reverse |
+              .[:($count|tonumber)] |
+              .[].tag_name
+            ' "${{ env.WORK_DIR }}/releases.json")
+          fi
+          
+          TOTAL=$(echo "$RELEASES" | wc -l)
+          echo "Selected $TOTAL unique releases:"
+          
+          # Show selected releases with versions
+          while IFS= read -r tag; do
+            VERSION=$(jq -r --arg tag "$tag" '.[] | select(.tag_name == $tag) | .name' "${{ env.WORK_DIR }}/releases.json")
+            echo "  $tag - $VERSION"
+          done <<< "$RELEASES"
+          
+          echo "$RELEASES" > ${{ env.WORK_DIR }}/release_list.txt
+          echo "total_releases=$TOTAL" >> $GITHUB_OUTPUT
+
+      - name: Process each release
+        run: |
+          mkdir -p ${{ env.WORK_DIR }}/output
+          PROCESSED=0
+          SKIPPED=0
+          
+          while IFS= read -r release_tag; do
+            echo ""
+            echo "========================================="
+            echo "Processing: $release_tag"
+            echo "========================================="
+            
+            # Get release info
+            RELEASE_DATA=$(jq --arg tag "$release_tag" '.[] | select(.tag_name == $tag)' "${{ env.WORK_DIR }}/releases.json")
+            
+            RELEASE_NAME=$(echo "$RELEASE_DATA" | jq -r '.name')
+            VANILLA_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("VANILLA"; "i")) | .browser_download_url' | head -1)
+            GAPPS_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("GAPPS"; "i")) | .browser_download_url' | head -1)
+            
+            if [[ -z "$VANILLA_URL" || -z "$GAPPS_URL" ]]; then
+              echo "SKIP: $release_tag - missing VANILLA or GAPPS assets"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
+            
+            echo "Release: $RELEASE_NAME"
+            
+            # Download
+            echo "  Downloading..."
+            mkdir -p ${{ env.WORK_DIR }}/downloads/$release_tag
+            curl -fL --retry 3 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/$release_tag/vanilla.img.xz" "$VANILLA_URL" 2>/dev/null
+            curl -fL --retry 3 --retry-delay 3 -o "${{ env.WORK_DIR }}/downloads/$release_tag/gapps.img.xz" "$GAPPS_URL" 2>/dev/null
+            
+            # Extract
+            echo "  Extracting VANILLA..."
+            mkdir -p ${{ env.WORK_DIR }}/extracted/$release_tag/vanilla
+            xz -d "${{ env.WORK_DIR }}/downloads/$release_tag/vanilla.img.xz" 2>/dev/null
+            set +e
+            7z x "${{ env.WORK_DIR }}/downloads/$release_tag/vanilla.img" -o"${{ env.WORK_DIR }}/extracted/$release_tag/vanilla" > /dev/null 2>&1
+            set -e
+            
+            echo "  Extracting GAPPS..."
+            mkdir -p ${{ env.WORK_DIR }}/extracted/$release_tag/gapps
+            xz -d "${{ env.WORK_DIR }}/downloads/$release_tag/gapps.img.xz" 2>/dev/null
+            set +e
+            7z x "${{ env.WORK_DIR }}/downloads/$release_tag/gapps.img" -o"${{ env.WORK_DIR }}/extracted/$release_tag/gapps" > /dev/null 2>&1
+            set -e
+            
+            # Generate diff
+            echo "  Comparing images..."
+            cd ${{ env.WORK_DIR }}/extracted/$release_tag
+            diff -qr vanilla gapps 2>&1 | grep -v 'No such file or directory' > full_diff_raw.txt || true
+            
+            cat full_diff_raw.txt | \
+              sed 's|system/product/|product/|g' | \
+              sed 's|system/system_ext/|system_ext/|g' | \
+              grep -E '(^Only in.*(system/|system_ext/|product/)|^Files.*(system/|system_ext/|product/))' | \
+              grep -v 'build\.prop' | sort -u > filtered_diff.txt || true
+            
+            DIFF_LINES=$(wc -l < filtered_diff.txt)
+            echo "  Differences found: $DIFF_LINES lines"
+            
+            # Parse diff
+            grep '^Only in gapps' filtered_diff.txt | sed 's|^Only in gapps/||' | sed 's|: |/|' | sort -u > gapps_only.txt
+            grep '^Only in vanilla' filtered_diff.txt | sed 's|^Only in vanilla/||' | sed 's|: |/|' | sort -u > vanilla_only.txt
+            grep '^Files.*differ' filtered_diff.txt | sed 's|^Files vanilla/||' | sed 's| and .* differ||' | sort -u > differ.txt
+            
+            GAPPS_COUNT=$(wc -l < gapps_only.txt)
+            VANILLA_COUNT=$(wc -l < vanilla_only.txt)
+            DIFFER_COUNT=$(wc -l < differ.txt)
+            
+            echo "  To delete: $GAPPS_COUNT, To restore: $VANILLA_COUNT, To replace: $DIFFER_COUNT"
+            
+            # Create ZIP
+            ZIP_DIR="${{ env.WORK_DIR }}/zip_$release_tag"
+            rm -rf "$ZIP_DIR"
+            mkdir -p "$ZIP_DIR"
+            
+            # Restore vanilla-only items
+            while IFS= read -r item; do
+              if [[ -n "$item" ]]; then
+                if [[ -f "vanilla/$item" ]]; then
+                  mkdir -p "$ZIP_DIR/$(dirname "$item")"
+                  cp "vanilla/$item" "$ZIP_DIR/$item"
+                elif [[ -d "vanilla/$item" ]]; then
+                  mkdir -p "$ZIP_DIR/$item"
+                  cp -r "vanilla/$item/"* "$ZIP_DIR/$item/" 2>/dev/null || true
+                fi
+              fi
+            done < vanilla_only.txt
+            
+            # Replace different files
+            while IFS= read -r file; do
+              if [[ -n "$file" && -f "vanilla/$file" ]]; then
+                mkdir -p "$ZIP_DIR/$(dirname "$file")"
+                cp "vanilla/$file" "$ZIP_DIR/$file"
+              fi
+            done < differ.txt
+            
+            # Delete list
+            while IFS= read -r item; do
+              if [[ -n "$item" ]]; then
+                echo "/$item" >> "$ZIP_DIR/delete.list"
+              fi
+            done < gapps_only.txt
+            
+            # META-INF
+            mkdir -p "$ZIP_DIR/META-INF/com/google/android"
+            cp "${{ github.workspace }}/scripts/update-binary" "$ZIP_DIR/META-INF/com/google/android/update-binary"
+            cp "${{ github.workspace }}/scripts/updater-script" "$ZIP_DIR/META-INF/com/google/android/updater-script"
+            chmod +x "$ZIP_DIR/META-INF/com/google/android/update-binary"
+            
+            # Create ZIP
+            ZIP_NAME="gapps-to-vanilla-${release_tag}.zip"
+            cd "$ZIP_DIR"
+            zip -r "${{ env.WORK_DIR }}/output/${ZIP_NAME}" . -x "*.git*" > /dev/null 2>&1
+            
+            ZIP_SIZE=$(du -h "${{ env.WORK_DIR }}/output/${ZIP_NAME}" | cut -f1)
+            echo "  Created: ${ZIP_NAME} (${ZIP_SIZE})"
+            
+            PROCESSED=$((PROCESSED + 1))
+            
+            # Cleanup to save space
+            rm -rf "${{ env.WORK_DIR }}/downloads/$release_tag"
+            rm -rf "${{ env.WORK_DIR }}/extracted/$release_tag"
+            rm -rf "$ZIP_DIR"
+            
+          done < ${{ env.WORK_DIR }}/release_list.txt
+          
+          echo ""
+          echo "========================================="
+          echo "Batch complete!"
+          echo "  Processed: $PROCESSED"
+          echo "  Skipped: $SKIPPED"
+          echo ""
+          echo "Generated ZIPs:"
+          ls -lh ${{ env.WORK_DIR }}/output/
+          
+          echo "processed=$PROCESSED" >> $GITHUB_OUTPUT
+          echo "skipped=$SKIPPED" >> $GITHUB_OUTPUT
+
+      - name: Upload all ZIPs
+        uses: actions/upload-artifact@v4
+        with:
+          name: gapps-to-vanilla-batch
+          path: ${{ env.WORK_DIR }}/output/*
+          retention-days: 30
+
+      - name: Display summary
+        run: |
+          echo "## Batch Generation Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Source:** ${{ steps.set_api.outputs.api_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Processed:** ${{ steps.process_releases.outputs.processed }} releases" >> $GITHUB_STEP_SUMMARY
+          echo "**Skipped:** ${{ steps.process_releases.outputs.skipped }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Generated ZIPs:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          ls -lh ${{ env.WORK_DIR }}/output/ >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
