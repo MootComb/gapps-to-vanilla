@@ -104,7 +104,7 @@ jobs:
           
           FIRST_TAG=$(echo "$RELEASES" | head -1)
           ROM_NAME=$(jq -r --arg tag "$FIRST_TAG" '.[] | select(.tag_name == $tag) | .name' "${{ env.WORK_DIR }}/releases.json" | grep -oP '^[^0-9]+' | sed 's/ *$//' | sed 's/ $//')
-          ROM_NAME_CLEAN=$(echo "$ROM_NAME" | sed 's/ //g')
+          ROM_NAME_CLEAN=$(echo "$ROM_NAME" | sed 's/ //g' | tr '[:upper:]' '[:lower:]')
           echo "ROM: $ROM_NAME -> $ROM_NAME_CLEAN"
           echo "rom_name=$ROM_NAME" >> $GITHUB_OUTPUT
           echo "rom_name_clean=$ROM_NAME_CLEAN" >> $GITHUB_OUTPUT
@@ -120,6 +120,7 @@ jobs:
       - name: Process each release
         id: process_releases
         run: |
+          ROM_NAME="${{ steps.fetch_all.outputs.rom_name }}"
           ROM_NAME_CLEAN="${{ steps.fetch_all.outputs.rom_name_clean }}"
           RELEASE_TAG_NAME="gapps-to-vanilla-${ROM_NAME_CLEAN}"
           
@@ -235,7 +236,7 @@ jobs:
             cp "${{ github.workspace }}/scripts/updater-script" "$ZIP_DIR/META-INF/com/google/android/updater-script"
             chmod +x "$ZIP_DIR/META-INF/com/google/android/update-binary"
             
-            ZIP_NAME="gapps-to-vanilla-${release_tag}.zip"
+            ZIP_NAME="gapps-to-vanilla_${ROM_NAME_CLEAN}-${VERSION_NUM}.zip"
             
             cd "$ZIP_DIR"
             zip -r "${{ env.WORK_DIR }}/output/${ZIP_NAME}" . -x "*.git*" > /dev/null 2>&1
@@ -283,7 +284,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.process_releases.outputs.release_tag_name }}
-          name: "${{ steps.fetch_all.outputs.rom_name_clean }}"
+          name: "${{ steps.fetch_all.outputs.rom_name }}"
           body: |
             ## gapps-to-vanilla
             
