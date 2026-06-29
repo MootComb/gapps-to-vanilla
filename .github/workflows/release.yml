@@ -284,7 +284,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.process_releases.outputs.release_tag_name }}
-          name: "${{ steps.fetch_all.outputs.rom_name }}"
+          name: "${{ steps.fetch_all.outputs.rom_name_clean }}"
           body: |
             ## gapps-to-vanilla
             
