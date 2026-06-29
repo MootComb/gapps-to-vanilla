@@ -43,7 +43,20 @@ jobs:
         id: set_api
         run: |
           if [[ -n "${{ github.event.inputs.source_api_url }}" ]]; then
-            echo "api_url=${{ github.event.inputs.source_api_url }}" >> $GITHUB_OUTPUT
+            INPUT_URL="${{ github.event.inputs.source_api_url }}"
+            # Convert github.com URL to api.github.com URL
+            if echo "$INPUT_URL" | grep -q 'github.com'; then
+              # Remove trailing slash, remove /releases if present
+              CLEAN_URL=$(echo "$INPUT_URL" | sed 's|/$||' | sed 's|/releases$||')
+              # Extract owner/repo from URL
+              REPO_PATH=$(echo "$CLEAN_URL" | sed 's|https://github.com/||')
+              # Build API URL
+              API_URL="https://api.github.com/repos/${REPO_PATH}/releases"
+            else
+              API_URL="$INPUT_URL"
+            fi
+            echo "api_url=$API_URL" >> $GITHUB_OUTPUT
+            echo "Using API URL: $API_URL"
           else
             echo "api_url=${{ env.DEFAULT_API_URL }}" >> $GITHUB_OUTPUT
           fi
