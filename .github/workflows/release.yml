@@ -104,7 +104,7 @@ jobs:
           
           FIRST_TAG=$(echo "$RELEASES" | head -1)
           ROM_NAME=$(jq -r --arg tag "$FIRST_TAG" '.[] | select(.tag_name == $tag) | .name' "${{ env.WORK_DIR }}/releases.json" | grep -oP '^[^0-9]+' | sed 's/ *$//' | sed 's/ $//')
-          ROM_NAME_CLEAN=$(echo "$ROM_NAME" | sed 's/ //g' | tr '[:upper:]' '[:lower:]')
+          ROM_NAME_CLEAN=$(echo "$ROM_NAME" | sed 's/ //g')
           echo "ROM: $ROM_NAME -> $ROM_NAME_CLEAN"
           echo "rom_name=$ROM_NAME" >> $GITHUB_OUTPUT
           echo "rom_name_clean=$ROM_NAME_CLEAN" >> $GITHUB_OUTPUT
