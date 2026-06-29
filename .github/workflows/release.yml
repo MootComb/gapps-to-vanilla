@@ -102,11 +102,12 @@ jobs:
           TOTAL=$(echo "$RELEASES" | wc -l)
           echo "Selected $TOTAL unique releases (newest first):"
           
-          # Extract ROM name from first release
           FIRST_TAG=$(echo "$RELEASES" | head -1)
           ROM_NAME=$(jq -r --arg tag "$FIRST_TAG" '.[] | select(.tag_name == $tag) | .name' "${{ env.WORK_DIR }}/releases.json" | grep -oP '^[^0-9]+' | sed 's/ *$//' | sed 's/ $//')
-          echo "ROM: $ROM_NAME"
+          ROM_NAME_CLEAN=$(echo "$ROM_NAME" | sed 's/ //g')
+          echo "ROM: $ROM_NAME -> $ROM_NAME_CLEAN"
           echo "rom_name=$ROM_NAME" >> $GITHUB_OUTPUT
+          echo "rom_name_clean=$ROM_NAME_CLEAN" >> $GITHUB_OUTPUT
           
           while IFS= read -r tag; do
             VERSION=$(jq -r --arg tag "$tag" '.[] | select(.tag_name == $tag) | .name' "${{ env.WORK_DIR }}/releases.json")
@@ -119,12 +120,10 @@ jobs:
       - name: Process each release
         id: process_releases
         run: |
-          ROM_NAME="${{ steps.fetch_all.outputs.rom_name }}"
-          ROM_NAME_CLEAN=$(echo "$ROM_NAME" | sed 's/ //g')
+          ROM_NAME_CLEAN="${{ steps.fetch_all.outputs.rom_name_clean }}"
           RELEASE_TAG_NAME="gapps-to-vanilla-${ROM_NAME_CLEAN}"
           
-          API_URL="${{ steps.set_api.outputs.api_url }}"
-          REPO_PATH=$(echo "$API_URL" | sed 's|https://api.github.com/repos/||' | sed 's|/releases||')
+          REPO_PATH="${{ github.repository }}"
           
           mkdir -p ${{ env.WORK_DIR }}/output
           rm -f ${{ env.WORK_DIR }}/output/*.zip
@@ -236,11 +235,7 @@ jobs:
             cp "${{ github.workspace }}/scripts/updater-script" "$ZIP_DIR/META-INF/com/google/android/updater-script"
             chmod +x "$ZIP_DIR/META-INF/com/google/android/update-binary"
             
-            if [[ -n "$VERSION_NUM" ]]; then
-              ZIP_NAME="gapps-to-vanilla_infinityX-${VERSION_NUM}.zip"
-            else
-              ZIP_NAME="gapps-to-vanilla-${release_tag}.zip"
-            fi
+            ZIP_NAME="gapps-to-vanilla-${release_tag}.zip"
             
             cd "$ZIP_DIR"
             zip -r "${{ env.WORK_DIR }}/output/${ZIP_NAME}" . -x "*.git*" > /dev/null 2>&1
@@ -288,7 +283,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.process_releases.outputs.release_tag_name }}
-          name: "${{ steps.fetch_all.outputs.rom_name }}"
+          name: "${{ steps.fetch_all.outputs.rom_name_clean }}"
           body: |
             ## gapps-to-vanilla
             
