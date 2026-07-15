@@ -214,31 +214,23 @@ jobs:
             # Get all assets and categorize them
             echo "  Analyzing assets for pairing..."
             
-            # Extract all GAPPS assets with their metadata
+            # Extract all GAPPS assets with their metadata - FIXED jq syntax
             GAPPS_ASSETS=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("GAPPS"; "i")) | 
-              {
-                name: .name,
-                url: .browser_download_url,
-                size: .size,
-                arch: (.name | capture("arm64|arm32|arm[^0-9]") // "arm64"),
-                fs: (.name | capture("ext4|erofs|ext") // "ext4"),
-                ext: (.name | capture("\\.(img\\.xz|img\\.gz|img|zip)$") // "" | .[0] // ".img.xz")
-              } | 
-              "\(.name)|\(.url)|\(.size)|\(.arch)|\(.fs)|\(.ext)"
-            ')
+              [.name, .browser_download_url, .size, 
+               (.name | capture("arm64|arm32|arm[^0-9]") // "arm64" | .[0]),
+               (.name | capture("ext4|erofs|ext") // "ext4" | .[0]),
+               (.name | capture("\\.(img\\.xz|img\\.gz|img|zip)$") // "" | .[0] // ".img.xz")
+              ] | @csv
+            ' | sed 's/"//g')
             
-            # Extract all VANILLA assets with their metadata
+            # Extract all VANILLA assets with their metadata - FIXED jq syntax
             VANILLA_ASSETS=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("VANILLA"; "i")) | 
-              {
-                name: .name,
-                url: .browser_download_url,
-                size: .size,
-                arch: (.name | capture("arm64|arm32|arm[^0-9]") // "arm64"),
-                fs: (.name | capture("ext4|erofs|ext") // "ext4"),
-                ext: (.name | capture("\\.(img\\.xz|img\\.gz|img|zip)$") // "" | .[0] // ".img.xz")
-              } | 
-              "\(.name)|\(.url)|\(.size)|\(.arch)|\(.fs)|\(.ext)"
-            ')
+              [.name, .browser_download_url, .size,
+               (.name | capture("arm64|arm32|arm[^0-9]") // "arm64" | .[0]),
+               (.name | capture("ext4|erofs|ext") // "ext4" | .[0]),
+               (.name | capture("\\.(img\\.xz|img\\.gz|img|zip)$") // "" | .[0] // ".img.xz")
+              ] | @csv
+            ' | sed 's/"//g')
             
             GAPPS_COUNT=$(echo "$GAPPS_ASSETS" | grep -v '^$' | wc -l)
             VANILLA_COUNT=$(echo "$VANILLA_ASSETS" | grep -v '^$' | wc -l)
@@ -259,12 +251,12 @@ jobs:
               
               # Store arrays
               GAPPS_ARRAY=()
-              while IFS='|' read -r name url size arch fs ext; do
+              while IFS=',' read -r name url size arch fs ext; do
                 GAPPS_ARRAY+=("$name|$url|$size|$arch|$fs|$ext")
               done <<< "$GAPPS_ASSETS"
               
               VANILLA_ARRAY=()
-              while IFS='|' read -r name url size arch fs ext; do
+              while IFS=',' read -r name url size arch fs ext; do
                 VANILLA_ARRAY+=("$name|$url|$size|$arch|$fs|$ext")
               done <<< "$VANILLA_ASSETS"
               
@@ -312,11 +304,13 @@ jobs:
                     size_diff=$(( -size_diff ))
                   fi
                   local size_avg=$(( (gapps_size + vanilla_size) / 2 ))
-                  local size_ratio=$(( (size_diff * 100) / size_avg ))
-                  if [[ $size_ratio -lt 20 ]]; then
-                    score=$((score + 20))  # Very similar size
-                  elif [[ $size_ratio -lt 40 ]]; then
-                    score=$((score + 10))  # Moderately similar
+                  if [[ $size_avg -gt 0 ]]; then
+                    local size_ratio=$(( (size_diff * 100) / size_avg ))
+                    if [[ $size_ratio -lt 20 ]]; then
+                      score=$((score + 20))  # Very similar size
+                    elif [[ $size_ratio -lt 40 ]]; then
+                      score=$((score + 10))  # Moderately similar
+                    fi
                   fi
                   
                   # 5. GAPPS should be larger than VANILLA (normal case)
@@ -367,7 +361,7 @@ jobs:
               # Show all alternatives for debugging
               if [[ $GAPPS_COUNT -gt 1 ]]; then
                 echo "  Alternative GAPPS candidates:"
-                while IFS='|' read -r name url size arch fs ext; do
+                while IFS=',' read -r name url size arch fs ext; do
                   if [[ "$name" != "$GAPPS_NAME" ]]; then
                     echo "    - $name (arch=$arch, fs=$fs, ext=$ext)"
                   fi
@@ -375,7 +369,7 @@ jobs:
               fi
               if [[ $VANILLA_COUNT -gt 1 ]]; then
                 echo "  Alternative VANILLA candidates:"
-                while IFS='|' read -r name url size arch fs ext; do
+                while IFS=',' read -r name url size arch fs ext; do
                   if [[ "$name" != "$VANILLA_NAME" ]]; then
                     echo "    - $name (arch=$arch, fs=$fs, ext=$ext)"
                   fi
