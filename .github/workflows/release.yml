@@ -211,15 +211,176 @@ jobs:
             
             RELEASE_NAME=$(echo "$RELEASE_DATA" | jq -r '.name')
             
-            VANILLA_ASSET=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("VANILLA"; "i")) | .name' | head -1)
-            GAPPS_ASSET=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("GAPPS"; "i")) | .name' | head -1)
-            VANILLA_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("VANILLA"; "i")) | .browser_download_url' | head -1)
-            GAPPS_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("GAPPS"; "i")) | .browser_download_url' | head -1)
+            # Get all assets and categorize them
+            echo "  Analyzing assets for pairing..."
             
-            if [[ -z "$VANILLA_URL" || -z "$GAPPS_URL" ]]; then
-              echo "SKIP: $release_tag - missing VANILLA or GAPPS assets"
+            # Extract all GAPPS assets with their metadata
+            GAPPS_ASSETS=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("GAPPS"; "i")) | 
+              {
+                name: .name,
+                url: .browser_download_url,
+                size: .size,
+                arch: (.name | capture("arm64|arm32|arm[^0-9]") // "arm64"),
+                fs: (.name | capture("ext4|erofs|ext") // "ext4"),
+                ext: (.name | capture("\\.(img\\.xz|img\\.gz|img|zip)$") // "" | .[0] // ".img.xz")
+              } | 
+              "\(.name)|\(.url)|\(.size)|\(.arch)|\(.fs)|\(.ext)"
+            ')
+            
+            # Extract all VANILLA assets with their metadata
+            VANILLA_ASSETS=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("VANILLA"; "i")) | 
+              {
+                name: .name,
+                url: .browser_download_url,
+                size: .size,
+                arch: (.name | capture("arm64|arm32|arm[^0-9]") // "arm64"),
+                fs: (.name | capture("ext4|erofs|ext") // "ext4"),
+                ext: (.name | capture("\\.(img\\.xz|img\\.gz|img|zip)$") // "" | .[0] // ".img.xz")
+              } | 
+              "\(.name)|\(.url)|\(.size)|\(.arch)|\(.fs)|\(.ext)"
+            ')
+            
+            GAPPS_COUNT=$(echo "$GAPPS_ASSETS" | grep -v '^$' | wc -l)
+            VANILLA_COUNT=$(echo "$VANILLA_ASSETS" | grep -v '^$' | wc -l)
+            
+            echo "  Found $GAPPS_COUNT GAPPS asset(s) and $VANILLA_COUNT VANILLA asset(s)"
+            
+            if [[ $GAPPS_COUNT -eq 0 || $VANILLA_COUNT -eq 0 ]]; then
+              echo "  SKIP: $release_tag - missing VANILLA or GAPPS assets"
               SKIPPED=$((SKIPPED + 1))
               continue
+            fi
+            
+            # Function to find best matching pair
+            find_best_pair() {
+              local best_score=-1
+              local best_gapps=""
+              local best_vanilla=""
+              
+              # Store arrays
+              GAPPS_ARRAY=()
+              while IFS='|' read -r name url size arch fs ext; do
+                GAPPS_ARRAY+=("$name|$url|$size|$arch|$fs|$ext")
+              done <<< "$GAPPS_ASSETS"
+              
+              VANILLA_ARRAY=()
+              while IFS='|' read -r name url size arch fs ext; do
+                VANILLA_ARRAY+=("$name|$url|$size|$arch|$fs|$ext")
+              done <<< "$VANILLA_ASSETS"
+              
+              for gapps_item in "${GAPPS_ARRAY[@]}"; do
+                IFS='|' read -r gapps_name gapps_url gapps_size gapps_arch gapps_fs gapps_ext <<< "$gapps_item"
+                
+                for vanilla_item in "${VANILLA_ARRAY[@]}"; do
+                  IFS='|' read -r vanilla_name vanilla_url vanilla_size vanilla_arch vanilla_fs vanilla_ext <<< "$vanilla_item"
+                  
+                  # Calculate score for this pair
+                  local score=0
+                  
+                  # 1. Same extension is REQUIRED (priority)
+                  if [[ "$gapps_ext" != "$vanilla_ext" ]]; then
+                    continue  # Skip this pair
+                  fi
+                  
+                  # 2. Same architecture (arm64 preferred)
+                  if [[ "$gapps_arch" == "$vanilla_arch" ]]; then
+                    if [[ "$gapps_arch" == "arm64" ]]; then
+                      score=$((score + 100))  # Highest priority for arm64
+                    else
+                      score=$((score + 80))   # arm32 or other
+                    fi
+                  else
+                    # Different architectures - still possible but lower priority
+                    score=$((score + 30))
+                  fi
+                  
+                  # 3. Same filesystem (ext4 preferred over erofs)
+                  if [[ "$gapps_fs" == "$vanilla_fs" ]]; then
+                    if [[ "$gapps_fs" == "ext4" || "$gapps_fs" == "ext" ]]; then
+                      score=$((score + 50))   # ext4 preferred
+                    else
+                      score=$((score + 40))   # erofs or other
+                    fi
+                  else
+                    # Different filesystems - still possible
+                    score=$((score + 10))
+                  fi
+                  
+                  # 4. Similar size (within 20% range)
+                  local size_diff=$((gapps_size - vanilla_size))
+                  if [[ $size_diff -lt 0 ]]; then
+                    size_diff=$(( -size_diff ))
+                  fi
+                  local size_avg=$(( (gapps_size + vanilla_size) / 2 ))
+                  local size_ratio=$(( (size_diff * 100) / size_avg ))
+                  if [[ $size_ratio -lt 20 ]]; then
+                    score=$((score + 20))  # Very similar size
+                  elif [[ $size_ratio -lt 40 ]]; then
+                    score=$((score + 10))  # Moderately similar
+                  fi
+                  
+                  # 5. GAPPS should be larger than VANILLA (normal case)
+                  if [[ $gapps_size -gt $vanilla_size ]]; then
+                    score=$((score + 15))  # Expected behavior
+                  fi
+                  
+                  # Track best score
+                  if [[ $score -gt $best_score ]]; then
+                    best_score=$score
+                    best_gapps="$gapps_item"
+                    best_vanilla="$vanilla_item"
+                  fi
+                done
+              done
+              
+              echo "$best_gapps|$best_vanilla|$best_score"
+            }
+            
+            # Find the best matching pair
+            BEST_PAIR=$(find_best_pair)
+            IFS='|' read -r GAPPS_INFO VANILLA_INFO SCORE <<< "$BEST_PAIR"
+            
+            if [[ -z "$GAPPS_INFO" || -z "$VANILLA_INFO" ]]; then
+              echo "  SKIP: $release_tag - no compatible pair found"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
+            
+            # Extract data for the chosen pair
+            IFS='|' read -r GAPPS_NAME GAPPS_URL GAPPS_SIZE GAPPS_ARCH GAPPS_FS GAPPS_EXT <<< "$GAPPS_INFO"
+            IFS='|' read -r VANILLA_NAME VANILLA_URL VANILLA_SIZE VANILLA_ARCH VANILLA_FS VANILLA_EXT <<< "$VANILLA_INFO"
+            
+            echo "  ✓ Selected best matching pair (score: $SCORE):"
+            echo "    GAPPS:   $GAPPS_NAME"
+            echo "    VANILLA: $VANILLA_NAME"
+            echo "    Match criteria: arch=$GAPPS_ARCH, fs=$GAPPS_FS, ext=$GAPPS_EXT"
+            
+            # Check if there were other candidates (for logging)
+            if [[ $GAPPS_COUNT -gt 1 || $VANILLA_COUNT -gt 1 ]]; then
+              echo "  Note: Multiple candidates found. Selected best match based on:"
+              echo "    - Extension match (required)"
+              echo "    - Architecture (arm64 preferred)"
+              echo "    - Filesystem (ext4 preferred)"
+              echo "    - Similar size"
+              echo "    - GAPPS > VANILLA in size"
+              
+              # Show all alternatives for debugging
+              if [[ $GAPPS_COUNT -gt 1 ]]; then
+                echo "  Alternative GAPPS candidates:"
+                while IFS='|' read -r name url size arch fs ext; do
+                  if [[ "$name" != "$GAPPS_NAME" ]]; then
+                    echo "    - $name (arch=$arch, fs=$fs, ext=$ext)"
+                  fi
+                done <<< "$GAPPS_ASSETS"
+              fi
+              if [[ $VANILLA_COUNT -gt 1 ]]; then
+                echo "  Alternative VANILLA candidates:"
+                while IFS='|' read -r name url size arch fs ext; do
+                  if [[ "$name" != "$VANILLA_NAME" ]]; then
+                    echo "    - $name (arch=$arch, fs=$fs, ext=$ext)"
+                  fi
+                done <<< "$VANILLA_ASSETS"
+              fi
             fi
             
             VERSION_NUM=$(echo "$RELEASE_NAME" | grep -oP '[0-9]+\.[0-9]+' | head -1)
@@ -229,9 +390,9 @@ jobs:
             ZIP_NAME="gapps-to-vanilla_${ROM_NAME_CLEAN}-${VERSION_NUM}.zip"
             
             echo "Release: $CLEAN_NAME (v$VERSION_NUM, $RELEASE_DATE)"
-            echo "  VANILLA file: $VANILLA_ASSET"
-            echo "  GAPPS file:   $GAPPS_ASSET"
-            echo "  Comparing: $VANILLA_ASSET vs $GAPPS_ASSET"
+            echo "  VANILLA file: $VANILLA_NAME"
+            echo "  GAPPS file:   $GAPPS_NAME"
+            echo "  Comparing: $VANILLA_NAME vs $GAPPS_NAME"
             echo ""
             
             echo "  Downloading..."
@@ -293,34 +454,34 @@ jobs:
             grep '^Only in vanilla' filtered_diff.txt | sed 's|^Only in vanilla/||' | sed 's|: |/|' | sort -u > vanilla_only.txt
             grep '^Files.*differ' filtered_diff.txt | sed 's|^Files vanilla/||' | sed 's| and .* differ||' | sort -u > differ.txt
             
-            GAPPS_COUNT=$(wc -l < gapps_only.txt)
-            VANILLA_COUNT=$(wc -l < vanilla_only.txt)
+            GAPPS_COUNT_FILES=$(wc -l < gapps_only.txt)
+            VANILLA_COUNT_FILES=$(wc -l < vanilla_only.txt)
             DIFFER_COUNT=$(wc -l < differ.txt)
             
-            echo "  Files only in GAPPS (will be deleted): $GAPPS_COUNT"
-            if [[ "$GAPPS_COUNT" -gt 0 && "$GAPPS_COUNT" -le 20 ]]; then
+            echo "  Files only in GAPPS (will be deleted): $GAPPS_COUNT_FILES"
+            if [[ "$GAPPS_COUNT_FILES" -gt 0 && "$GAPPS_COUNT_FILES" -le 20 ]]; then
               cat gapps_only.txt | while read -r file; do
                 echo "    - $file"
               done
-            elif [[ "$GAPPS_COUNT" -gt 20 ]]; then
-              echo "    (showing first 10 of $GAPPS_COUNT)"
+            elif [[ "$GAPPS_COUNT_FILES" -gt 20 ]]; then
+              echo "    (showing first 10 of $GAPPS_COUNT_FILES)"
               head -10 gapps_only.txt | while read -r file; do
                 echo "    - $file"
               done
-              echo "    ... and $((GAPPS_COUNT - 10)) more"
+              echo "    ... and $((GAPPS_COUNT_FILES - 10)) more"
             fi
             
-            echo "  Files only in VANILLA (will be restored): $VANILLA_COUNT"
-            if [[ "$VANILLA_COUNT" -gt 0 && "$VANILLA_COUNT" -le 20 ]]; then
+            echo "  Files only in VANILLA (will be restored): $VANILLA_COUNT_FILES"
+            if [[ "$VANILLA_COUNT_FILES" -gt 0 && "$VANILLA_COUNT_FILES" -le 20 ]]; then
               cat vanilla_only.txt | while read -r file; do
                 echo "    - $file"
               done
-            elif [[ "$VANILLA_COUNT" -gt 20 ]]; then
-              echo "    (showing first 10 of $VANILLA_COUNT)"
+            elif [[ "$VANILLA_COUNT_FILES" -gt 20 ]]; then
+              echo "    (showing first 10 of $VANILLA_COUNT_FILES)"
               head -10 vanilla_only.txt | while read -r file; do
                 echo "    - $file"
               done
-              echo "    ... and $((VANILLA_COUNT - 10)) more"
+              echo "    ... and $((VANILLA_COUNT_FILES - 10)) more"
             fi
             
             echo "  Files that differ (will be replaced): $DIFFER_COUNT"
@@ -337,7 +498,7 @@ jobs:
             fi
             
             echo ""
-            echo "  Summary: Delete $GAPPS_COUNT, Restore $VANILLA_COUNT, Replace $DIFFER_COUNT"
+            echo "  Summary: Delete $GAPPS_COUNT_FILES, Restore $VANILLA_COUNT_FILES, Replace $DIFFER_COUNT"
             
             ZIP_DIR="${{ env.WORK_DIR }}/zip_$release_tag"
             rm -rf "$ZIP_DIR"
