@@ -14,7 +14,7 @@ on:
         type: string
         default: ''
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '0 0 * * *'
 
 env:
   DEFAULT_API_URL: "https://api.github.com/repos/Doze-off/ProjectInfinity-X_gsi/releases"
