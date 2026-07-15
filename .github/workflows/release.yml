@@ -395,15 +395,12 @@ jobs:
           echo "========================================="
           
           ALL_ZIPS_LIST=""
-          sort -t'|' -k1 -V -r "$TEMP_LIST" | \
-            awk -F'|' '!seen[$1]++' | \
-            while IFS='|' read -r version asset_name asset_url size display_name; do
-              DISPLAY_CLEAN=$(echo "$display_name" | sed 's/|.*//' | sed 's/ *$//')
-              ALL_ZIPS_LIST="${ALL_ZIPS_LIST}- [${asset_name}](${asset_url}) (${size}) — ${DISPLAY_CLEAN}
-          "
-            done
+          while IFS='|' read -r version asset_name asset_url size display_name; do
+            DISPLAY_CLEAN=$(echo "$display_name" | sed 's/|.*//' | sed 's/ *$//')
+            ALL_ZIPS_LIST="${ALL_ZIPS_LIST}- [${asset_name}](${asset_url}) (${size}) — ${DISPLAY_CLEAN}\n"
+          done < <(sort -t'|' -k1 -V -r "$TEMP_LIST" | awk -F'|' '!seen[$1]++')
           
-          echo "$ALL_ZIPS_LIST" > ${{ env.WORK_DIR }}/all_zips_list.txt
+          echo -e "$ALL_ZIPS_LIST" > ${{ env.WORK_DIR }}/all_zips_list.txt
           
           echo ""
           echo "========================================="
