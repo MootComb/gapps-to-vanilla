@@ -433,7 +433,11 @@ jobs:
         run: |
           ALL_ZIPS=$(cat ${{ env.WORK_DIR }}/all_zips_list.txt)
           
-          cat > ${{ env.WORK_DIR }}/release_body.md << EOF
+          # Escape special characters for JSON
+          ALL_ZIPS_ESCAPED=$(echo "$ALL_ZIPS" | jq -R -s .)
+          
+          # Create release body with proper escaping
+          BODY=$(cat <<EOF
           ## gapps-to-vanilla
           
           **Source:** ${{ steps.set_api.outputs.api_url }}
@@ -450,11 +454,17 @@ jobs:
           2. Flash via TWRP/OrangeFox recovery
           3. Reboot system
           EOF
+          )
           
-          gh release edit ${{ steps.get_existing.outputs.release_tag_name }} \
-            --title "${{ steps.fetch_all.outputs.rom_name_clean }}" \
-            --body-file ${{ env.WORK_DIR }}/release_body.md \
-            --repo "${{ github.repository }}"
+          # Escape body for JSON
+          BODY_JSON=$(echo "$BODY" | jq -R -s .)
+          
+          # Update release using GitHub API directly
+          curl -X PATCH \
+            -H "Authorization: token ${{ github.token }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ steps.get_existing.outputs.release_tag_name }}" \
+            -d "{\"name\":\"${{ steps.fetch_all.outputs.rom_name_clean }}\",\"body\":${BODY_JSON}}"
           
           echo "Release updated successfully!"
         env:
