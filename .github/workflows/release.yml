@@ -64,7 +64,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y xz-utils p7zip-full jq curl zip
+          sudo apt-get install -y xz-utils p7zip-full jq curl zip bc
 
       - name: Fetch all releases and select unique versions
         id: fetch_all
@@ -183,8 +183,10 @@ jobs:
           PROCESSED=0
           SKIPPED=0
           ALL_ZIPS_LIST=""
+          TEMP_LIST="${{ env.WORK_DIR }}/temp_list.txt"
+          > "$TEMP_LIST"
           
-          # First, add all existing assets to the ALL_ZIPS_LIST
+          # First, add all existing assets to the temp list
           if [[ -s ${{ env.WORK_DIR }}/existing_assets_info.txt ]]; then
             echo ""
             echo "========================================="
@@ -203,9 +205,8 @@ jobs:
               VERSION_FROM_ASSET=$(echo "$asset_name" | grep -oP '[0-9]+\.[0-9]+' | head -1)
               
               if [[ -n "$VERSION_FROM_ASSET" ]]; then
-                ALL_ZIPS_LIST="${ALL_ZIPS_LIST}- [${asset_name}](${asset_url}) (${SIZE_HR}) — ${ROM_NAME} ${VERSION_FROM_ASSET}
-          "
-                echo "  Added existing: $asset_name ($SIZE_HR)"
+                echo "${VERSION_FROM_ASSET}|${asset_name}|${asset_url}|${SIZE_HR}|${ROM_NAME} ${VERSION_FROM_ASSET}" >> "$TEMP_LIST"
+                echo "  Added existing: $asset_name ($SIZE_HR) -> version $VERSION_FROM_ASSET"
               fi
             done < ${{ env.WORK_DIR }}/existing_assets_info.txt
           fi
@@ -241,6 +242,8 @@ jobs:
             echo "Release: $CLEAN_NAME (v$VERSION_NUM, $RELEASE_DATE)"
             echo "  VANILLA file: $VANILLA_ASSET"
             echo "  GAPPS file:   $GAPPS_ASSET"
+            echo "  Comparing: $VANILLA_ASSET vs $GAPPS_ASSET"
+            echo ""
             
             echo "  Downloading..."
             mkdir -p ${{ env.WORK_DIR }}/downloads/$release_tag
@@ -267,9 +270,30 @@ jobs:
             7z x "${{ env.WORK_DIR }}/downloads/$release_tag/gapps.img" -o"${{ env.WORK_DIR }}/extracted/$release_tag/gapps" > /dev/null 2>&1
             set -e
             
-            echo "  Comparing..."
+            echo "  Comparing filesystems..."
             cd ${{ env.WORK_DIR }}/extracted/$release_tag
+            
+            echo "  Running: diff -qr vanilla gapps"
+            echo "  (Comparing all files between VANILLA and GAPPS images)"
+            echo ""
+            
             diff -qr vanilla gapps 2>&1 | grep -v 'No such file or directory' > full_diff_raw.txt || true
+            
+            # Show first 10 lines of diff for preview
+            DIFF_LINES=$(wc -l < full_diff_raw.txt)
+            echo "  Total diff lines: $DIFF_LINES"
+            if [[ "$DIFF_LINES" -gt 0 ]]; then
+              echo "  Diff preview (first 10 lines):"
+              head -10 full_diff_raw.txt | while read -r line; do
+                echo "    $line"
+              done
+              if [[ "$DIFF_LINES" -gt 10 ]]; then
+                echo "    ... and $((DIFF_LINES - 10)) more lines"
+              fi
+            else
+              echo "  No differences found!"
+            fi
+            echo ""
             
             cat full_diff_raw.txt | \
               sed 's|system/product/|product/|g' | \
@@ -285,7 +309,47 @@ jobs:
             VANILLA_COUNT=$(wc -l < vanilla_only.txt)
             DIFFER_COUNT=$(wc -l < differ.txt)
             
-            echo "  Delete: $GAPPS_COUNT, Restore: $VANILLA_COUNT, Replace: $DIFFER_COUNT"
+            echo "  Files only in GAPPS (will be deleted): $GAPPS_COUNT"
+            if [[ "$GAPPS_COUNT" -gt 0 && "$GAPPS_COUNT" -le 20 ]]; then
+              cat gapps_only.txt | while read -r file; do
+                echo "    - $file"
+              done
+            elif [[ "$GAPPS_COUNT" -gt 20 ]]; then
+              echo "    (showing first 10 of $GAPPS_COUNT)"
+              head -10 gapps_only.txt | while read -r file; do
+                echo "    - $file"
+              done
+              echo "    ... and $((GAPPS_COUNT - 10)) more"
+            fi
+            
+            echo "  Files only in VANILLA (will be restored): $VANILLA_COUNT"
+            if [[ "$VANILLA_COUNT" -gt 0 && "$VANILLA_COUNT" -le 20 ]]; then
+              cat vanilla_only.txt | while read -r file; do
+                echo "    - $file"
+              done
+            elif [[ "$VANILLA_COUNT" -gt 20 ]]; then
+              echo "    (showing first 10 of $VANILLA_COUNT)"
+              head -10 vanilla_only.txt | while read -r file; do
+                echo "    - $file"
+              done
+              echo "    ... and $((VANILLA_COUNT - 10)) more"
+            fi
+            
+            echo "  Files that differ (will be replaced): $DIFFER_COUNT"
+            if [[ "$DIFFER_COUNT" -gt 0 && "$DIFFER_COUNT" -le 20 ]]; then
+              cat differ.txt | while read -r file; do
+                echo "    - $file"
+              done
+            elif [[ "$DIFFER_COUNT" -gt 20 ]]; then
+              echo "    (showing first 10 of $DIFFER_COUNT)"
+              head -10 differ.txt | while read -r file; do
+                echo "    - $file"
+              done
+              echo "    ... and $((DIFFER_COUNT - 10)) more"
+            fi
+            
+            echo ""
+            echo "  Summary: Delete $GAPPS_COUNT, Restore $VANILLA_COUNT, Replace $DIFFER_COUNT"
             
             ZIP_DIR="${{ env.WORK_DIR }}/zip_$release_tag"
             rm -rf "$ZIP_DIR"
@@ -327,9 +391,8 @@ jobs:
             ZIP_SIZE=$(du -h "${{ env.WORK_DIR }}/output/${ZIP_NAME}" | cut -f1)
             echo "  Done: ${ZIP_NAME} (${ZIP_SIZE})"
             
-            # Add to all zips list (new)
-            ALL_ZIPS_LIST="${ALL_ZIPS_LIST}- [${ZIP_NAME}](https://github.com/${REPO_PATH}/releases/download/${RELEASE_TAG_NAME}/${ZIP_NAME}) (${ZIP_SIZE}) — ${CLEAN_NAME} (${RELEASE_DATE})
-          "
+            # Add new zip to temp list
+            echo "${VERSION_NUM}|${ZIP_NAME}|https://github.com/${REPO_PATH}/releases/download/${RELEASE_TAG_NAME}/${ZIP_NAME}|${ZIP_SIZE}|${ROM_NAME} ${VERSION_NUM}" >> "$TEMP_LIST"
             
             PROCESSED=$((PROCESSED + 1))
             
@@ -338,6 +401,22 @@ jobs:
             rm -rf "$ZIP_DIR"
             
           done < ${{ env.WORK_DIR }}/release_list.txt
+          
+          # Sort by version (newest first) and remove duplicates (keep first occurrence)
+          echo ""
+          echo "========================================="
+          echo "Sorting downloads by version (newest first)..."
+          echo "========================================="
+          
+          # Sort by version descending (newest first) and remove duplicates based on version
+          sort -t'|' -k1 -V -r "$TEMP_LIST" | \
+            awk -F'|' '!seen[$1]++' | \
+            while IFS='|' read -r version asset_name asset_url size display_name; do
+              # Clean display name - remove everything after |
+              DISPLAY_CLEAN=$(echo "$display_name" | sed 's/|.*//' | sed 's/ *$//')
+              ALL_ZIPS_LIST="${ALL_ZIPS_LIST}- [${asset_name}](${asset_url}) (${size}) — ${DISPLAY_CLEAN}
+          "
+            done
           
           echo ""
           echo "========================================="
