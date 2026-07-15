@@ -130,12 +130,50 @@ jobs:
           echo "$RELEASES" > ${{ env.WORK_DIR }}/release_list.txt
           echo "total_releases=$TOTAL" >> $GITHUB_OUTPUT
 
+      - name: Get existing release assets
+        id: get_existing
+        run: |
+          ROM_NAME_CLEAN="${{ steps.fetch_all.outputs.rom_name_clean }}"
+          RELEASE_TAG_NAME="gapps-to-vanilla-${ROM_NAME_CLEAN}"
+          
+          echo "release_tag_name=$RELEASE_TAG_NAME" >> $GITHUB_OUTPUT
+          
+          # Get existing assets from release
+          echo "Checking existing release: $RELEASE_TAG_NAME"
+          
+          RELEASE_RESPONSE=$(curl -fsSL \
+            -H "Authorization: token ${{ github.token }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG_NAME" 2>/dev/null || echo "null")
+          
+          if [[ "$RELEASE_RESPONSE" != "null" ]]; then
+            ASSET_NAMES=$(echo "$RELEASE_RESPONSE" | jq -r '.assets[].name' 2>/dev/null)
+            if [[ -n "$ASSET_NAMES" ]]; then
+              echo "Found existing assets:"
+              echo "$ASSET_NAMES" | while read -r name; do
+                echo "  - $name"
+              done
+              echo "$ASSET_NAMES" > ${{ env.WORK_DIR }}/existing_assets.txt
+              
+              # Also get full asset info with download URLs and sizes
+              echo "$RELEASE_RESPONSE" | jq -r '.assets[] | "\(.name)|\(.browser_download_url)|\(.size)"' > ${{ env.WORK_DIR }}/existing_assets_info.txt
+            else
+              echo "Release exists but has no assets"
+              touch ${{ env.WORK_DIR }}/existing_assets.txt
+              touch ${{ env.WORK_DIR }}/existing_assets_info.txt
+            fi
+          else
+            echo "No existing release found"
+            touch ${{ env.WORK_DIR }}/existing_assets.txt
+            touch ${{ env.WORK_DIR }}/existing_assets_info.txt
+          fi
+
       - name: Process each release
         id: process_releases
         run: |
           ROM_NAME="${{ steps.fetch_all.outputs.rom_name }}"
           ROM_NAME_CLEAN="${{ steps.fetch_all.outputs.rom_name_clean }}"
-          RELEASE_TAG_NAME="gapps-to-vanilla-${ROM_NAME_CLEAN}"
+          RELEASE_TAG_NAME="${{ steps.get_existing.outputs.release_tag_name }}"
           
           REPO_PATH="${{ github.repository }}"
           
@@ -144,7 +182,33 @@ jobs:
           
           PROCESSED=0
           SKIPPED=0
-          ZIP_LIST=""
+          ALL_ZIPS_LIST=""
+          
+          # First, add all existing assets to the ALL_ZIPS_LIST
+          if [[ -s ${{ env.WORK_DIR }}/existing_assets_info.txt ]]; then
+            echo ""
+            echo "========================================="
+            echo "Adding existing assets to Downloads list"
+            echo "========================================="
+            
+            while IFS='|' read -r asset_name asset_url asset_size; do
+              # Format size
+              if [[ "$asset_size" -lt 1048576 ]]; then
+                SIZE_HR="$((asset_size / 1024))K"
+              else
+                SIZE_HR="$(echo "scale=1; $asset_size / 1048576" | bc)M"
+              fi
+              
+              # Extract version from asset name
+              VERSION_FROM_ASSET=$(echo "$asset_name" | grep -oP '[0-9]+\.[0-9]+' | head -1)
+              
+              if [[ -n "$VERSION_FROM_ASSET" ]]; then
+                ALL_ZIPS_LIST="${ALL_ZIPS_LIST}- [${asset_name}](${asset_url}) (${SIZE_HR}) — ${ROM_NAME} ${VERSION_FROM_ASSET}
+          "
+                echo "  Added existing: $asset_name ($SIZE_HR)"
+              fi
+            done < ${{ env.WORK_DIR }}/existing_assets_info.txt
+          fi
           
           while IFS= read -r release_tag; do
             echo ""
@@ -155,6 +219,10 @@ jobs:
             RELEASE_DATA=$(jq --arg tag "$release_tag" '.[] | select(.tag_name == $tag)' "${{ env.WORK_DIR }}/releases.json")
             
             RELEASE_NAME=$(echo "$RELEASE_DATA" | jq -r '.name')
+            
+            # Get full asset names
+            VANILLA_ASSET=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("VANILLA"; "i")) | .name' | head -1)
+            GAPPS_ASSET=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("GAPPS"; "i")) | .name' | head -1)
             VANILLA_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("VANILLA"; "i")) | .browser_download_url' | head -1)
             GAPPS_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("GAPPS"; "i")) | .browser_download_url' | head -1)
             
@@ -168,7 +236,11 @@ jobs:
             RELEASE_DATE=$(echo "$RELEASE_DATA" | jq -r '.published_at' | cut -d'T' -f1)
             CLEAN_NAME=$(echo "$RELEASE_NAME" | sed 's/ | TREBLE GSI OFFICIAL-signed//')
             
+            ZIP_NAME="gapps-to-vanilla_${ROM_NAME_CLEAN}-${VERSION_NUM}.zip"
+            
             echo "Release: $CLEAN_NAME (v$VERSION_NUM, $RELEASE_DATE)"
+            echo "  VANILLA file: $VANILLA_ASSET"
+            echo "  GAPPS file:   $GAPPS_ASSET"
             
             echo "  Downloading..."
             mkdir -p ${{ env.WORK_DIR }}/downloads/$release_tag
@@ -249,15 +321,14 @@ jobs:
             cp "${{ github.workspace }}/scripts/updater-script" "$ZIP_DIR/META-INF/com/google/android/updater-script"
             chmod +x "$ZIP_DIR/META-INF/com/google/android/update-binary"
             
-            ZIP_NAME="gapps-to-vanilla_${ROM_NAME_CLEAN}-${VERSION_NUM}.zip"
-            
             cd "$ZIP_DIR"
             zip -r "${{ env.WORK_DIR }}/output/${ZIP_NAME}" . -x "*.git*" > /dev/null 2>&1
             
             ZIP_SIZE=$(du -h "${{ env.WORK_DIR }}/output/${ZIP_NAME}" | cut -f1)
             echo "  Done: ${ZIP_NAME} (${ZIP_SIZE})"
             
-            ZIP_LIST="${ZIP_LIST}- [${ZIP_NAME}](https://github.com/${REPO_PATH}/releases/download/${RELEASE_TAG_NAME}/${ZIP_NAME}) (${ZIP_SIZE}) — ${CLEAN_NAME} (${RELEASE_DATE})
+            # Add to all zips list (new)
+            ALL_ZIPS_LIST="${ALL_ZIPS_LIST}- [${ZIP_NAME}](https://github.com/${REPO_PATH}/releases/download/${RELEASE_TAG_NAME}/${ZIP_NAME}) (${ZIP_SIZE}) — ${CLEAN_NAME} (${RELEASE_DATE})
           "
             
             PROCESSED=$((PROCESSED + 1))
@@ -279,11 +350,10 @@ jobs:
           echo "processed=$PROCESSED" >> $GITHUB_OUTPUT
           echo "skipped=$SKIPPED" >> $GITHUB_OUTPUT
           echo "generated_date=$GENERATED_DATE" >> $GITHUB_OUTPUT
-          echo "release_tag_name=$RELEASE_TAG_NAME" >> $GITHUB_OUTPUT
           
-          echo "zip_list<<ZIPLISTEOF" >> $GITHUB_OUTPUT
-          echo "$ZIP_LIST" >> $GITHUB_OUTPUT
-          echo "ZIPLISTEOF" >> $GITHUB_OUTPUT
+          echo "all_zips_list<<ALLZIPSEOF" >> $GITHUB_OUTPUT
+          echo "$ALL_ZIPS_LIST" >> $GITHUB_OUTPUT
+          echo "ALLZIPSEOF" >> $GITHUB_OUTPUT
 
       - name: Upload all ZIPs as artifact
         uses: actions/upload-artifact@v4
@@ -296,7 +366,7 @@ jobs:
         if: ${{ github.event.inputs.create_release == 'true' && steps.process_releases.outputs.processed > 0 }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.process_releases.outputs.release_tag_name }}
+          tag_name: ${{ steps.get_existing.outputs.release_tag_name }}
           name: "${{ steps.fetch_all.outputs.rom_name_clean }}"
           body: |
             ## gapps-to-vanilla
@@ -307,7 +377,7 @@ jobs:
             
             ### Downloads
             
-            ${{ steps.process_releases.outputs.zip_list }}
+            ${{ steps.process_releases.outputs.all_zips_list }}
             
             ### Instructions
             
@@ -327,4 +397,4 @@ jobs:
           echo "**Versions:** ${{ steps.process_releases.outputs.processed }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Downloads" >> $GITHUB_STEP_SUMMARY
-          echo "${{ steps.process_releases.outputs.zip_list }}" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.process_releases.outputs.all_zips_list }}" >> $GITHUB_STEP_SUMMARY
