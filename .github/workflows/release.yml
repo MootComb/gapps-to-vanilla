@@ -44,13 +44,9 @@ jobs:
         run: |
           if [[ -n "${{ github.event.inputs.source_api_url }}" ]]; then
             INPUT_URL="${{ github.event.inputs.source_api_url }}"
-            # Convert github.com URL to api.github.com URL
             if echo "$INPUT_URL" | grep -q 'github.com'; then
-              # Remove trailing slash, remove /releases if present
               CLEAN_URL=$(echo "$INPUT_URL" | sed 's|/$||' | sed 's|/releases$||')
-              # Extract owner/repo from URL
               REPO_PATH=$(echo "$CLEAN_URL" | sed 's|https://github.com/||')
-              # Build API URL
               API_URL="https://api.github.com/repos/${REPO_PATH}/releases"
             else
               API_URL="$INPUT_URL"
@@ -138,7 +134,6 @@ jobs:
           
           echo "release_tag_name=$RELEASE_TAG_NAME" >> $GITHUB_OUTPUT
           
-          # Get existing assets from release
           echo "Checking existing release: $RELEASE_TAG_NAME"
           
           RELEASE_RESPONSE=$(curl -fsSL \
@@ -155,7 +150,6 @@ jobs:
               done
               echo "$ASSET_NAMES" > ${{ env.WORK_DIR }}/existing_assets.txt
               
-              # Also get full asset info with download URLs and sizes
               echo "$RELEASE_RESPONSE" | jq -r '.assets[] | "\(.name)|\(.browser_download_url)|\(.size)"' > ${{ env.WORK_DIR }}/existing_assets_info.txt
             else
               echo "Release exists but has no assets"
@@ -186,7 +180,6 @@ jobs:
           TEMP_LIST="${{ env.WORK_DIR }}/temp_list.txt"
           > "$TEMP_LIST"
           
-          # First, add all existing assets to the temp list
           if [[ -s ${{ env.WORK_DIR }}/existing_assets_info.txt ]]; then
             echo ""
             echo "========================================="
@@ -194,14 +187,12 @@ jobs:
             echo "========================================="
             
             while IFS='|' read -r asset_name asset_url asset_size; do
-              # Format size
               if [[ "$asset_size" -lt 1048576 ]]; then
                 SIZE_HR="$((asset_size / 1024))K"
               else
                 SIZE_HR="$(echo "scale=1; $asset_size / 1048576" | bc)M"
               fi
               
-              # Extract version from asset name
               VERSION_FROM_ASSET=$(echo "$asset_name" | grep -oP '[0-9]+\.[0-9]+' | head -1)
               
               if [[ -n "$VERSION_FROM_ASSET" ]]; then
@@ -221,7 +212,6 @@ jobs:
             
             RELEASE_NAME=$(echo "$RELEASE_DATA" | jq -r '.name')
             
-            # Get full asset names
             VANILLA_ASSET=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("VANILLA"; "i")) | .name' | head -1)
             GAPPS_ASSET=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("GAPPS"; "i")) | .name' | head -1)
             VANILLA_URL=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("VANILLA"; "i")) | .browser_download_url' | head -1)
@@ -279,7 +269,6 @@ jobs:
             
             diff -qr vanilla gapps 2>&1 | grep -v 'No such file or directory' > full_diff_raw.txt || true
             
-            # Show first 10 lines of diff for preview
             DIFF_LINES=$(wc -l < full_diff_raw.txt)
             echo "  Total diff lines: $DIFF_LINES"
             if [[ "$DIFF_LINES" -gt 0 ]]; then
@@ -391,7 +380,6 @@ jobs:
             ZIP_SIZE=$(du -h "${{ env.WORK_DIR }}/output/${ZIP_NAME}" | cut -f1)
             echo "  Done: ${ZIP_NAME} (${ZIP_SIZE})"
             
-            # Add new zip to temp list
             echo "${VERSION_NUM}|${ZIP_NAME}|https://github.com/${REPO_PATH}/releases/download/${RELEASE_TAG_NAME}/${ZIP_NAME}|${ZIP_SIZE}|${ROM_NAME} ${VERSION_NUM}" >> "$TEMP_LIST"
             
             PROCESSED=$((PROCESSED + 1))
@@ -402,17 +390,14 @@ jobs:
             
           done < ${{ env.WORK_DIR }}/release_list.txt
           
-          # Sort by version (newest first) and remove duplicates (keep first occurrence)
           echo ""
           echo "========================================="
           echo "Sorting downloads by version (newest first)..."
           echo "========================================="
           
-          # Sort by version descending (newest first) and remove duplicates based on version
           sort -t'|' -k1 -V -r "$TEMP_LIST" | \
             awk -F'|' '!seen[$1]++' | \
             while IFS='|' read -r version asset_name asset_url size display_name; do
-              # Clean display name - remove everything after |
               DISPLAY_CLEAN=$(echo "$display_name" | sed 's/|.*//' | sed 's/ *$//')
               ALL_ZIPS_LIST="${ALL_ZIPS_LIST}- [${asset_name}](${asset_url}) (${size}) — ${DISPLAY_CLEAN}
           "
@@ -430,6 +415,8 @@ jobs:
           echo "skipped=$SKIPPED" >> $GITHUB_OUTPUT
           echo "generated_date=$GENERATED_DATE" >> $GITHUB_OUTPUT
           
+          echo "$ALL_ZIPS_LIST" > ${{ env.WORK_DIR }}/all_zips_list.txt
+          
           echo "all_zips_list<<ALLZIPSEOF" >> $GITHUB_OUTPUT
           echo "$ALL_ZIPS_LIST" >> $GITHUB_OUTPUT
           echo "ALLZIPSEOF" >> $GITHUB_OUTPUT
@@ -443,29 +430,35 @@ jobs:
 
       - name: Create GitHub Release
         if: ${{ github.event.inputs.create_release == 'true' && steps.process_releases.outputs.processed > 0 }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.get_existing.outputs.release_tag_name }}
-          name: "${{ steps.fetch_all.outputs.rom_name_clean }}"
-          body: |
-            ## gapps-to-vanilla
-            
-            **Source:** ${{ steps.set_api.outputs.api_url }}
-            **Generated:** ${{ steps.process_releases.outputs.generated_date }}
-            **Versions:** ${{ steps.process_releases.outputs.processed }}
-            
-            ### Downloads
-            
-            ${{ steps.process_releases.outputs.all_zips_list }}
-            
-            ### Instructions
-            
-            1. Download the ZIP for your version
-            2. Flash via TWRP/OrangeFox recovery
-            3. Reboot system
-          files: ${{ env.WORK_DIR }}/output/*
-          draft: false
-          prerelease: false
+        run: |
+          ALL_ZIPS=$(cat ${{ env.WORK_DIR }}/all_zips_list.txt)
+          
+          cat > ${{ env.WORK_DIR }}/release_body.md << EOF
+          ## gapps-to-vanilla
+          
+          **Source:** ${{ steps.set_api.outputs.api_url }}
+          **Generated:** ${{ steps.process_releases.outputs.generated_date }}
+          **Versions:** ${{ steps.process_releases.outputs.processed }}
+          
+          ### Downloads
+          
+          ${ALL_ZIPS}
+          
+          ### Instructions
+          
+          1. Download the ZIP for your version
+          2. Flash via TWRP/OrangeFox recovery
+          3. Reboot system
+          EOF
+          
+          gh release edit ${{ steps.get_existing.outputs.release_tag_name }} \
+            --title "${{ steps.fetch_all.outputs.rom_name_clean }}" \
+            --body-file ${{ env.WORK_DIR }}/release_body.md \
+            --repo "${{ github.repository }}"
+          
+          echo "Release updated successfully!"
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Display summary
         run: |
@@ -476,4 +469,4 @@ jobs:
           echo "**Versions:** ${{ steps.process_releases.outputs.processed }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Downloads" >> $GITHUB_STEP_SUMMARY
-          echo "${{ steps.process_releases.outputs.all_zips_list }}" >> $GITHUB_STEP_SUMMARY
+          cat ${{ env.WORK_DIR }}/all_zips_list.txt >> $GITHUB_STEP_SUMMARY
