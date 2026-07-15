@@ -176,7 +176,6 @@ jobs:
           
           PROCESSED=0
           SKIPPED=0
-          ALL_ZIPS_LIST=""
           TEMP_LIST="${{ env.WORK_DIR }}/temp_list.txt"
           > "$TEMP_LIST"
           
@@ -395,6 +394,7 @@ jobs:
           echo "Sorting downloads by version (newest first)..."
           echo "========================================="
           
+          ALL_ZIPS_LIST=""
           sort -t'|' -k1 -V -r "$TEMP_LIST" | \
             awk -F'|' '!seen[$1]++' | \
             while IFS='|' read -r version asset_name asset_url size display_name; do
@@ -402,6 +402,8 @@ jobs:
               ALL_ZIPS_LIST="${ALL_ZIPS_LIST}- [${asset_name}](${asset_url}) (${size}) — ${DISPLAY_CLEAN}
           "
             done
+          
+          echo "$ALL_ZIPS_LIST" > ${{ env.WORK_DIR }}/all_zips_list.txt
           
           echo ""
           echo "========================================="
@@ -415,10 +417,8 @@ jobs:
           echo "skipped=$SKIPPED" >> $GITHUB_OUTPUT
           echo "generated_date=$GENERATED_DATE" >> $GITHUB_OUTPUT
           
-          echo "$ALL_ZIPS_LIST" > ${{ env.WORK_DIR }}/all_zips_list.txt
-          
           echo "all_zips_list<<ALLZIPSEOF" >> $GITHUB_OUTPUT
-          echo "$ALL_ZIPS_LIST" >> $GITHUB_OUTPUT
+          cat ${{ env.WORK_DIR }}/all_zips_list.txt >> $GITHUB_OUTPUT
           echo "ALLZIPSEOF" >> $GITHUB_OUTPUT
 
       - name: Upload all ZIPs as artifact
@@ -433,11 +433,7 @@ jobs:
         run: |
           ALL_ZIPS=$(cat ${{ env.WORK_DIR }}/all_zips_list.txt)
           
-          # Escape special characters for JSON
-          ALL_ZIPS_ESCAPED=$(echo "$ALL_ZIPS" | jq -R -s .)
-          
-          # Create release body with proper escaping
-          BODY=$(cat <<EOF
+          cat > ${{ env.WORK_DIR }}/release_body.md << EOF
           ## gapps-to-vanilla
           
           **Source:** ${{ steps.set_api.outputs.api_url }}
@@ -454,17 +450,11 @@ jobs:
           2. Flash via TWRP/OrangeFox recovery
           3. Reboot system
           EOF
-          )
           
-          # Escape body for JSON
-          BODY_JSON=$(echo "$BODY" | jq -R -s .)
-          
-          # Update release using GitHub API directly
-          curl -X PATCH \
-            -H "Authorization: token ${{ github.token }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ steps.get_existing.outputs.release_tag_name }}" \
-            -d "{\"name\":\"${{ steps.fetch_all.outputs.rom_name_clean }}\",\"body\":${BODY_JSON}}"
+          gh release edit ${{ steps.get_existing.outputs.release_tag_name }} \
+            --title "${{ steps.fetch_all.outputs.rom_name_clean }}" \
+            --notes-file ${{ env.WORK_DIR }}/release_body.md \
+            --repo "${{ github.repository }}"
           
           echo "Release updated successfully!"
         env:
