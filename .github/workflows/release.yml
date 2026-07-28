@@ -578,32 +578,106 @@ jobs:
       - name: Create GitHub Release
         if: ${{ github.event.inputs.create_release == 'true' && steps.process_releases.outputs.processed > 0 }}
         run: |
-          ALL_ZIPS=$(cat ${{ env.WORK_DIR }}/all_zips_list.txt)
-          
-          cat > ${{ env.WORK_DIR }}/release_body.md << EOF
-          ## gapps-to-vanilla
-          
-          **Source:** ${{ steps.set_api.outputs.api_url }}
-          **Generated:** ${{ steps.process_releases.outputs.generated_date }}
-          **Versions:** ${{ steps.process_releases.outputs.processed }}
-          
-          ### Downloads
-          
-          ${ALL_ZIPS}
-          
-          ### Instructions
-          
-          1. Download the ZIP for your version
-          2. Flash via TWRP/OrangeFox recovery
-          3. Reboot system
-          EOF
-          
-          gh release edit ${{ steps.get_existing.outputs.release_tag_name }} \
-            --title "${{ steps.fetch_all.outputs.rom_name_clean }}" \
-            --notes-file ${{ env.WORK_DIR }}/release_body.md \
-            --repo "${{ github.repository }}"
-          
-          echo "Release updated successfully!"
+          RELEASE_TAG_NAME="${{ steps.get_existing.outputs.release_tag_name }}"
+    
+          echo "Checking release: $RELEASE_TAG_NAME"
+    
+          NEW_ZIPS=()
+          for zip in ${{ env.WORK_DIR }}/output/*.zip; do
+            if [[ -f "$zip" ]]; then
+              ZIP_NAME=$(basename "$zip")
+              NEW_ZIPS+=("$ZIP_NAME")
+              echo "New ZIP: $ZIP_NAME"
+            fi
+          done
+    
+          if [[ ${#NEW_ZIPS[@]} -eq 0 ]]; then
+            echo "No new ZIPs to upload"
+            exit 0
+          fi
+    
+          RELEASE_EXISTS=$(gh release view "$RELEASE_TAG_NAME" --repo "${{ github.repository }}" 2>/dev/null && echo "yes" || echo "no")
+    
+          if [[ "$RELEASE_EXISTS" == "yes" ]]; then
+            echo "Release exists. Checking for assets to replace..."
+      
+            ASSET_INFO=$(gh release view "$RELEASE_TAG_NAME" --json assets --jq '.assets[] | "\(.id)|\(.name)"')
+      
+            for ZIP_NAME in "${NEW_ZIPS[@]}"; do
+              echo "Looking for existing asset: $ZIP_NAME"
+        
+              ASSET_ID=$(echo "$ASSET_INFO" | grep "|$ZIP_NAME$" | cut -d'|' -f1)
+        
+              if [[ -n "$ASSET_ID" ]]; then
+                echo "  Found existing asset ID: $ASSET_ID - deleting..."
+                gh api -X DELETE "repos/${{ github.repository }}/releases/assets/$ASSET_ID" --silent
+                echo "  Deleted old version of $ZIP_NAME"
+              else
+                echo "  No existing asset named $ZIP_NAME found"
+              fi
+            done
+      
+            echo "Updating release notes..."
+            cat > ${{ env.WORK_DIR }}/release_body.md << EOF
+            ## gapps-to-vanilla
+      
+            **Source:** ${{ steps.set_api.outputs.api_url }}
+            **Generated:** ${{ steps.process_releases.outputs.generated_date }}
+            **Versions:** ${{ steps.process_releases.outputs.processed }}
+      
+            ### Downloads
+      
+            ${{ steps.process_releases.outputs.all_zips_list }}
+      
+            ### Instructions
+      
+            1. Download the ZIP for your version
+            2. Flash via TWRP/OrangeFox recovery
+            3. Reboot system
+            EOF
+      
+            gh release edit "$RELEASE_TAG_NAME" \
+              --title "${{ steps.fetch_all.outputs.rom_name_clean }}" \
+              --notes-file ${{ env.WORK_DIR }}/release_body.md \
+              --repo "${{ github.repository }}"
+          else
+            echo "Release doesn't exist. Creating new one..."
+      
+            cat > ${{ env.WORK_DIR }}/release_body.md << EOF
+            ## gapps-to-vanilla
+      
+            **Source:** ${{ steps.set_api.outputs.api_url }}
+            **Generated:** ${{ steps.process_releases.outputs.generated_date }}
+            **Versions:** ${{ steps.process_releases.outputs.processed }}
+      
+            ### Downloads
+      
+            ${{ steps.process_releases.outputs.all_zips_list }}
+      
+            ### Instructions
+      
+            1. Download the ZIP for your version
+            2. Flash via TWRP/OrangeFox recovery
+            3. Reboot system
+            EOF
+      
+            gh release create "$RELEASE_TAG_NAME" \
+              --title "${{ steps.fetch_all.outputs.rom_name_clean }}" \
+              --notes-file ${{ env.WORK_DIR }}/release_body.md \
+              --repo "${{ github.repository }}"
+          fi
+    
+          echo "Uploading new ZIPs..."
+          for zip in ${{ env.WORK_DIR }}/output/*.zip; do
+            if [[ -f "$zip" ]]; then
+              ZIP_NAME=$(basename "$zip")
+              echo "  Uploading: $ZIP_NAME"
+              gh release upload "$RELEASE_TAG_NAME" "$zip" --clobber --repo "${{ github.repository }}"
+            fi
+          done
+    
+          echo "✅ Release updated successfully!"
+          echo "Replaced ${#NEW_ZIPS[@]} assets"
         env:
           GH_TOKEN: ${{ github.token }}
 
