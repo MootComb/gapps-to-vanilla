@@ -580,22 +580,6 @@ jobs:
         run: |
           RELEASE_TAG_NAME="${{ steps.get_existing.outputs.release_tag_name }}"
     
-          echo "Processing release: $RELEASE_TAG_NAME"
-    
-          NEW_ZIPS=()
-          for zip in ${{ env.WORK_DIR }}/output/*.zip; do
-            if [[ -f "$zip" ]]; then
-              ZIP_NAME=$(basename "$zip")
-              NEW_ZIPS+=("$ZIP_NAME")
-              echo "New ZIP: $ZIP_NAME"
-            fi
-          done
-    
-          if [[ ${#NEW_ZIPS[@]} -eq 0 ]]; then
-            echo "No new ZIPs to upload"
-            exit 0
-          fi
-    
           echo "Creating release notes..."
           cat > ${{ env.WORK_DIR }}/release_body.md << 'EOF'
           ## gapps-to-vanilla
@@ -615,35 +599,26 @@ jobs:
           3. Reboot system
           EOF
     
-          # Try to create release, ignore if exists
-          gh release create "$RELEASE_TAG_NAME" \
-            --title "${{ steps.fetch_all.outputs.rom_name_clean }}" \
-            --notes-file ${{ env.WORK_DIR }}/release_body.md \
-            --repo "${{ github.repository }}" 2>/dev/null || true
+          # Create or update release
+          if gh release view "$RELEASE_TAG_NAME" --repo "${{ github.repository }}" &>/dev/null; then
+            echo "Release exists. Updating..."
+            gh release edit "$RELEASE_TAG_NAME" \
+              --title "${{ steps.fetch_all.outputs.rom_name_clean }}" \
+              --notes-file ${{ env.WORK_DIR }}/release_body.md \
+              --repo "${{ github.repository }}"
+          else
+            echo "Creating new release..."
+            gh release create "$RELEASE_TAG_NAME" \
+              --title "${{ steps.fetch_all.outputs.rom_name_clean }}" \
+              --notes-file ${{ env.WORK_DIR }}/release_body.md \
+              --repo "${{ github.repository }}"
+          fi
     
-          # Get existing assets
-          ASSET_INFO=$(gh release view "$RELEASE_TAG_NAME" --json assets --jq '.assets[] | "\(.id)|\(.name)"' --repo "${{ github.repository }}" 2>/dev/null)
-    
-          # Delete only old versions of new files
-          for ZIP_NAME in "${NEW_ZIPS[@]}"; do
-            ASSET_ID=$(echo "$ASSET_INFO" | grep "|$ZIP_NAME$" | cut -d'|' -f1)
-            if [[ -n "$ASSET_ID" ]]; then
-              echo "  Deleting old asset: $ZIP_NAME (ID: $ASSET_ID)"
-              gh api -X DELETE "repos/${{ github.repository }}/releases/assets/$ASSET_ID" --silent
-              sleep 2
-            else
-              echo "  No existing asset: $ZIP_NAME"
-            fi
-          done
-    
-          # Upload new ZIPs
-          echo "Uploading new ZIPs..."
+          # Upload ZIPs with overwrite
+          echo "Uploading ZIPs..."
           for zip in ${{ env.WORK_DIR }}/output/*.zip; do
             if [[ -f "$zip" ]]; then
-              ZIP_NAME=$(basename "$zip")
-              echo "  Uploading: $ZIP_NAME"
               gh release upload "$RELEASE_TAG_NAME" "$zip" --clobber --repo "${{ github.repository }}"
-              echo "  Uploaded: $ZIP_NAME"
             fi
           done
     
