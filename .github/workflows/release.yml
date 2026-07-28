@@ -615,67 +615,35 @@ jobs:
           3. Reboot system
           EOF
     
-          # Check if release exists using API directly (more reliable)
-          RELEASE_EXISTS=false
-          if gh release view "$RELEASE_TAG_NAME" --repo "${{ github.repository }}" &>/dev/null; then
-            RELEASE_EXISTS=true
-            echo "Release exists: $RELEASE_TAG_NAME"
-          else
-            # Double check with API
-            if curl -s -o /dev/null -w "%{http_code}" \
-              -H "Authorization: token ${{ github.token }}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG_NAME" | grep -q "200"; then
-              RELEASE_EXISTS=true
-              echo "Release exists (confirmed via API)"
+          # Try to create release, ignore if exists
+          gh release create "$RELEASE_TAG_NAME" \
+            --title "${{ steps.fetch_all.outputs.rom_name_clean }}" \
+            --notes-file ${{ env.WORK_DIR }}/release_body.md \
+            --repo "${{ github.repository }}" 2>/dev/null || true
+    
+          # Get existing assets
+          ASSET_INFO=$(gh release view "$RELEASE_TAG_NAME" --json assets --jq '.assets[] | "\(.id)|\(.name)"' --repo "${{ github.repository }}" 2>/dev/null)
+    
+          # Delete only old versions of new files
+          for ZIP_NAME in "${NEW_ZIPS[@]}"; do
+            ASSET_ID=$(echo "$ASSET_INFO" | grep "|$ZIP_NAME$" | cut -d'|' -f1)
+            if [[ -n "$ASSET_ID" ]]; then
+              echo "  Deleting old asset: $ZIP_NAME (ID: $ASSET_ID)"
+              gh api -X DELETE "repos/${{ github.repository }}/releases/assets/$ASSET_ID" --silent
+              sleep 2
             else
-              echo "Release does not exist"
+              echo "  No existing asset: $ZIP_NAME"
             fi
-          fi
+          done
     
-          if [[ "$RELEASE_EXISTS" == "true" ]]; then
-            echo "Release exists. Replacing specific assets..."
-      
-            # Get existing assets
-            ASSET_INFO=$(gh release view "$RELEASE_TAG_NAME" --json assets --jq '.assets[] | "\(.id)|\(.name)"' --repo "${{ github.repository }}" 2>/dev/null)
-      
-            for ZIP_NAME in "${NEW_ZIPS[@]}"; do
-              ASSET_ID=$(echo "$ASSET_INFO" | grep "|$ZIP_NAME$" | cut -d'|' -f1)
-              if [[ -n "$ASSET_ID" ]]; then
-                echo "  Deleting old asset: $ZIP_NAME (ID: $ASSET_ID)"
-                gh api -X DELETE "repos/${{ github.repository }}/releases/assets/$ASSET_ID" --silent
-                sleep 2
-              else
-                echo "  No existing asset: $ZIP_NAME"
-              fi
-            done
-      
-            echo "Updating release notes..."
-            gh release edit "$RELEASE_TAG_NAME" \
-              --title "${{ steps.fetch_all.outputs.rom_name_clean }}" \
-              --notes-file ${{ env.WORK_DIR }}/release_body.md \
-              --repo "${{ github.repository }}"
-          else
-            echo "Release doesn't exist. Creating new one..."
-            gh release create "$RELEASE_TAG_NAME" \
-              --title "${{ steps.fetch_all.outputs.rom_name_clean }}" \
-              --notes-file ${{ env.WORK_DIR }}/release_body.md \
-              --repo "${{ github.repository }}"
-          fi
-    
+          # Upload new ZIPs
           echo "Uploading new ZIPs..."
           for zip in ${{ env.WORK_DIR }}/output/*.zip; do
             if [[ -f "$zip" ]]; then
               ZIP_NAME=$(basename "$zip")
               echo "  Uploading: $ZIP_NAME"
-              for i in 1 2 3; do
-                if gh release upload "$RELEASE_TAG_NAME" "$zip" --clobber --repo "${{ github.repository }}" 2>/dev/null; then
-                  echo "  Uploaded: $ZIP_NAME"
-                  break
-                fi
-                echo "  Retry $i..."
-                sleep 3
-              done
+              gh release upload "$RELEASE_TAG_NAME" "$zip" --clobber --repo "${{ github.repository }}"
+              echo "  Uploaded: $ZIP_NAME"
             fi
           done
     
