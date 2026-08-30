@@ -1,8 +1,4 @@
 #!/sbin/sh
-#
-# gapps-to-vanilla
-# Remove GAPPS and restore AOSP files
-#
 
 OUTFD=$2
 ZIPFILE=$3
@@ -29,7 +25,6 @@ abort() {
     exit 1
 }
 
-# Initialize log
 echo "=========================================" > $LOG_FILE
 echo "gapps-to-vanilla installation log" >> $LOG_FILE
 echo "Started: $(date)" >> $LOG_FILE
@@ -41,243 +36,258 @@ ui_print "   Remove GAPPS and restore AOSP"
 ui_print "========================================="
 ui_print " "
 
-log "Detecting partition layout..."
+log "========== PARTITION DETECTION =========="
 
-FOUND_SYSTEM=""
-FOUND_PRODUCT=""
-FOUND_SYSTEM_EXT=""
-SYSTEM_ROOT_MOUNT=""
-
-# Check all possible mount points
-if [ -d "/system_root/system" ] && [ -d "/system_root/system/app" ]; then
-    FOUND_SYSTEM="/system_root/system"
-    SYSTEM_ROOT_MOUNT="/system_root"
-    log "  Found /system_root/system (system_root layout)"
-elif [ -d "/system/app" ] || [ -d "/system/bin" ]; then
-    FOUND_SYSTEM="/system"
-    log "  Found /system (standard layout)"
-elif [ -L "/system" ]; then
-    REAL_SYSTEM=$(readlink -f /system)
-    if [ -d "$REAL_SYSTEM/app" ]; then
-        FOUND_SYSTEM="$REAL_SYSTEM"
-        SYSTEM_ROOT_MOUNT=$(dirname "$REAL_SYSTEM")
-        log "  /system is symlink to $REAL_SYSTEM"
-    fi
-fi
-
-if [ -d "/product/app" ] || [ -d "/product/bin" ]; then
-    FOUND_PRODUCT="/product"
-    log "  Found /product"
-elif [ -L "/product" ]; then
-    FOUND_PRODUCT=$(readlink -f /product)
-    log "  /product is symlink to $FOUND_PRODUCT"
-fi
-
-if [ -d "/system_ext/app" ] || [ -d "/system_ext/bin" ]; then
-    FOUND_SYSTEM_EXT="/system_ext"
-    log "  Found /system_ext"
-elif [ -L "/system_ext" ]; then
-    FOUND_SYSTEM_EXT=$(readlink -f /system_ext)
-    log "  /system_ext is symlink to $FOUND_SYSTEM_EXT"
-fi
-
-if [ -z "$FOUND_SYSTEM" ]; then
-    abort "Cannot find system partition!"
-fi
-
-log "Final mount points:"
-log "  SYSTEM: $FOUND_SYSTEM"
-log "  PRODUCT: $FOUND_PRODUCT"
-log "  SYSTEM_EXT: $FOUND_SYSTEM_EXT"
-log "  SYSTEM_ROOT: $SYSTEM_ROOT_MOUNT"
-
-ui_print "Step 1/6: Mounting partitions"
-log "Step 1/6: Mounting partitions"
-
-# Function to check if path is subdirectory of a mount point
-get_parent_mount() {
+get_mount_point() {
     local path="$1"
-    mount | awk '{print $3}' | grep -v '^/$' | sort -r | while read -r mp; do
-        case "$path" in
-            "$mp"/*)
-                echo "$mp"
-                return 0
-                ;;
-        esac
+    if mount | grep -q " $path "; then
+        echo "$path"
+        return 0
+    fi
+    local current="$path"
+    while [ "$current" != "/" ] && [ "$current" != "." ]; do
+        current=$(dirname "$current")
+        if mount | grep -q " $current "; then
+            echo "$current"
+            return 0
+        fi
     done
     echo ""
     return 1
 }
 
-# Function to try ALL methods to mount RW
-mount_rw() {
-    local mount_point="$1"
-    local device=""
-    local fs_type=""
-    
-    # Check if this is a subdirectory of already mounted partition
-    local parent_mp=$(get_parent_mount "$mount_point")
-    if [ -n "$parent_mp" ]; then
-        log "  $mount_point is inside $parent_mp"
-        
-        # Ensure parent is RW first
-        if ! mount | grep " $parent_mp " | grep -q 'rw,'; then
-            log "  Parent $parent_mp is RO, mounting RW first..."
-            mount_rw "$parent_mp" || return 1
-        fi
-        
-        if mount | grep " $parent_mp " | grep -q 'rw,'; then
-            log "  [OK] Parent $parent_mp is RW, writable"
-            return 0
-        fi
-    fi
-    
-    # Find device for this mount point
-    device=$(mount | grep " $mount_point " | awk '{print $1}')
-    
-    if [ -z "$device" ]; then
-        if [ -n "$parent_mp" ]; then
-            log "  [OK] Using parent $parent_mp"
-            return 0
-        fi
-        log "  No device found for $mount_point"
-        return 1
-    fi
-    
-    fs_type=$(mount | grep " $mount_point " | awk '{print $5}')
-    log "  Device: $device, FS: $fs_type"
-    
-    # Check if already RW
-    if mount | grep " $mount_point " | grep -q 'rw,'; then
-        log "  [OK] Already mounted RW"
+get_device() {
+    local path="$1"
+    mount | grep " $path " | awk '{print $1}'
+}
+
+find_system() {
+    if [ -d "/system_root/system" ] && [ -d "/system_root/system/app" ]; then
+        echo "/system_root/system"
         return 0
     fi
-    
-    log "  Attempting to remount as RW..."
-    
-    # Method 1: mount -o rw,remount DEVICE MOUNTPOINT (works for dm-verity)
-    log "  Method 1: mount -o rw,remount $device $mount_point"
-    mount -o rw,remount $device $mount_point 2>/dev/null
-    if mount | grep " $mount_point " | grep -q 'rw,'; then
-        log "  [OK] Method 1: mount -o rw,remount device mountpoint"
+    if [ -d "/system_root" ] && [ -d "/system_root/app" ]; then
+        echo "/system_root"
         return 0
     fi
-    
-    # Method 2: mount -o remount,rw MOUNTPOINT (standard)
-    log "  Method 2: mount -o remount,rw $mount_point"
-    mount -o remount,rw $mount_point 2>/dev/null
-    if mount | grep " $mount_point " | grep -q 'rw,'; then
-        log "  [OK] Method 2: mount -o remount,rw"
+    if [ -d "/system" ] && [ -d "/system/app" ]; then
+        echo "/system"
         return 0
     fi
-    
-    # Method 3: toybox mount with device
-    if command -v toybox > /dev/null 2>&1; then
-        log "  Method 3: toybox mount -o rw,remount $device $mount_point"
-        toybox mount -o rw,remount $device $mount_point 2>/dev/null
-        if mount | grep " $mount_point " | grep -q 'rw,'; then
-            log "  [OK] Method 3: toybox mount device mountpoint"
-            return 0
-        fi
-        
-        log "  Method 4: toybox mount -o rw,remount $mount_point"
-        toybox mount -o rw,remount $mount_point 2>/dev/null
-        if mount | grep " $mount_point " | grep -q 'rw,'; then
-            log "  [OK] Method 4: toybox mount mountpoint"
-            return 0
-        fi
-    fi
-    
-    # Method 5: /sbin/mount with device
-    if [ -x "/sbin/mount" ]; then
-        log "  Method 5: /sbin/mount -o rw,remount $device $mount_point"
-        /sbin/mount -o rw,remount $device $mount_point 2>/dev/null
-        if mount | grep " $mount_point " | grep -q 'rw,'; then
-            log "  [OK] Method 5: /sbin/mount device mountpoint"
-            return 0
-        fi
-        
-        log "  Method 6: /sbin/mount -o rw,remount $mount_point"
-        /sbin/mount -o rw,remount $mount_point 2>/dev/null
-        if mount | grep " $mount_point " | grep -q 'rw,'; then
-            log "  [OK] Method 6: /sbin/mount mountpoint"
-            return 0
-        fi
-    fi
-    
-    # Method 7: fresh mount with RW flags
-    log "  Method 7: mount -o rw -t $fs_type $device $mount_point"
-    mount -o rw -t $fs_type $device $mount_point 2>/dev/null
-    if mount | grep " $mount_point " | grep -q 'rw,'; then
-        log "  [OK] Method 7: mount -o rw -t fstype device mountpoint"
+    if [ -d "/mnt/system" ] && [ -d "/mnt/system/app" ]; then
+        echo "/mnt/system"
         return 0
     fi
-    
-    log "  [FAILED] All 7 methods failed for $mount_point"
+    echo ""
     return 1
 }
 
-# Mount partitions - only mount actual mount points, not subdirectories
+find_product() {
+    if [ -d "/system_root/product" ] && [ -d "/system_root/product/app" ]; then
+        echo "/system_root/product"
+        return 0
+    fi
+    if [ -d "/product" ] && [ -d "/product/app" ]; then
+        echo "/product"
+        return 0
+    fi
+    if [ -d "/system/product" ] && [ -d "/system/product/app" ]; then
+        echo "/system/product"
+        return 0
+    fi
+    echo ""
+    return 1
+}
+
+find_system_ext() {
+    if [ -d "/system_root/system_ext" ] && [ -d "/system_root/system_ext/app" ]; then
+        echo "/system_root/system_ext"
+        return 0
+    fi
+    if [ -d "/system_root/system/system_ext" ] && [ -d "/system_root/system/system_ext/app" ]; then
+        echo "/system_root/system/system_ext"
+        return 0
+    fi
+    if [ -d "/system_ext" ] && [ -d "/system_ext/app" ]; then
+        echo "/system_ext"
+        return 0
+    fi
+    if [ -d "/system/system_ext" ] && [ -d "/system/system_ext/app" ]; then
+        echo "/system/system_ext"
+        return 0
+    fi
+    echo ""
+    return 1
+}
+
+find_vendor() {
+    if [ -d "/system_root/vendor" ]; then
+        echo "/system_root/vendor"
+        return 0
+    fi
+    if [ -d "/vendor" ]; then
+        echo "/vendor"
+        return 0
+    fi
+    if [ -d "/system/vendor" ]; then
+        echo "/system/vendor"
+        return 0
+    fi
+    echo ""
+    return 1
+}
+
+find_odm() {
+    if [ -d "/system_root/odm" ]; then
+        echo "/system_root/odm"
+        return 0
+    fi
+    if [ -d "/odm" ]; then
+        echo "/odm"
+        return 0
+    fi
+    if [ -d "/system/odm" ]; then
+        echo "/system/odm"
+        return 0
+    fi
+    echo ""
+    return 1
+}
+
+SYSTEM_PATH=$(find_system)
+PRODUCT_PATH=$(find_product)
+SYSTEM_EXT_PATH=$(find_system_ext)
+VENDOR_PATH=$(find_vendor)
+ODM_PATH=$(find_odm)
+
+if [ -z "$SYSTEM_PATH" ]; then
+    abort "Cannot find system partition"
+fi
+
+REAL_SYSTEM="$SYSTEM_PATH"
+REAL_PRODUCT="$PRODUCT_PATH"
+REAL_SYSTEM_EXT="$SYSTEM_EXT_PATH"
+REAL_VENDOR="$VENDOR_PATH"
+REAL_ODM="$ODM_PATH"
+
+log "REAL_SYSTEM: $REAL_SYSTEM"
+log "REAL_PRODUCT: $REAL_PRODUCT"
+log "REAL_SYSTEM_EXT: $REAL_SYSTEM_EXT"
+log "REAL_VENDOR: $REAL_VENDOR"
+log "REAL_ODM: $REAL_ODM"
+
+ui_print "Found system: $REAL_SYSTEM"
+[ -n "$REAL_PRODUCT" ] && ui_print "Found product: $REAL_PRODUCT"
+[ -n "$REAL_SYSTEM_EXT" ] && ui_print "Found system_ext: $REAL_SYSTEM_EXT"
+
+ui_print " "
+ui_print "Step 1/5: Mounting partitions RW"
+log "Step 1/5: Mounting partitions RW"
+
+is_rw() {
+    mount | grep " $1 " | grep -q 'rw,'
+}
+
+mount_rw() {
+    local path="$1"
+    local mount_point=$(get_mount_point "$path")
+    
+    if [ -z "$mount_point" ]; then
+        log "Cannot find mount point for: $path"
+        return 1
+    fi
+    
+    log "Mount point: $mount_point"
+    
+    if is_rw "$mount_point"; then
+        log "$mount_point already RW"
+        return 0
+    fi
+    
+    local device=$(get_device "$mount_point")
+    if [ -z "$device" ]; then
+        log "Cannot get device for: $mount_point"
+        return 1
+    fi
+    
+    log "Device: $device"
+    
+    mount -o rw,remount "$device" "$mount_point" 2>/dev/null
+    if is_rw "$mount_point"; then
+        log "RW mounted via device"
+        return 0
+    fi
+    
+    mount -o remount,rw "$mount_point" 2>/dev/null
+    if is_rw "$mount_point"; then
+        log "RW mounted via mount point"
+        return 0
+    fi
+    
+    if [ "$mount_point" = "/" ] || [ "$mount_point" = "/system_root" ]; then
+        mount -o rw,remount / 2>/dev/null
+        if is_rw "$mount_point"; then
+            log "RW mounted via root"
+            return 0
+        fi
+    fi
+    
+    log "Failed to mount RW for $mount_point"
+    return 1
+}
+
 MOUNT_POINTS=""
 
-# Add system_root if exists
-if [ -n "$SYSTEM_ROOT_MOUNT" ]; then
-    MOUNT_POINTS="$MOUNT_POINTS $SYSTEM_ROOT_MOUNT"
-fi
-
-# Add product and system_ext if they are separate mount points
-if [ -n "$FOUND_PRODUCT" ] && [ "$FOUND_PRODUCT" != "$FOUND_SYSTEM" ]; then
-    # Check if product is a subdirectory of system_root
-    if [ -z "$SYSTEM_ROOT_MOUNT" ] || ! echo "$FOUND_PRODUCT" | grep -q "^$SYSTEM_ROOT_MOUNT"; then
-        MOUNT_POINTS="$MOUNT_POINTS $FOUND_PRODUCT"
-    fi
-fi
-
-if [ -n "$FOUND_SYSTEM_EXT" ] && [ "$FOUND_SYSTEM_EXT" != "$FOUND_SYSTEM" ]; then
-    if [ -z "$SYSTEM_ROOT_MOUNT" ] || ! echo "$FOUND_SYSTEM_EXT" | grep -q "^$SYSTEM_ROOT_MOUNT"; then
-        MOUNT_POINTS="$MOUNT_POINTS $FOUND_SYSTEM_EXT"
-    fi
-fi
-
-# Add FOUND_SYSTEM only if it's a separate mount point (not subdirectory of system_root)
-if [ -n "$FOUND_SYSTEM" ]; then
-    if [ -z "$SYSTEM_ROOT_MOUNT" ] || [ "$FOUND_SYSTEM" != "$SYSTEM_ROOT_MOUNT/system" ]; then
-        MOUNT_POINTS="$MOUNT_POINTS $FOUND_SYSTEM"
-    fi
-fi
-
-log "Mount points to process: $MOUNT_POINTS"
-
-for point in $MOUNT_POINTS; do
-    if [ -n "$point" ]; then
-        ui_print "  -> $point"
-        log "  Mounting: $point"
-        if ! mount_rw "$point"; then
-            abort "Failed to mount $point as RW"
+for path in "$REAL_SYSTEM" "$REAL_PRODUCT" "$REAL_SYSTEM_EXT" "$REAL_VENDOR" "$REAL_ODM"; do
+    if [ -n "$path" ] && [ -d "$path" ]; then
+        mp=$(get_mount_point "$path")
+        if [ -n "$mp" ] && [ "$mp" != "/" ]; then
+            MOUNT_POINTS="$MOUNT_POINTS $mp"
+            log "Will mount: $mp"
         fi
-        ui_print "    [OK] $point writable"
     fi
 done
 
+MOUNT_POINTS=$(echo "$MOUNT_POINTS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+log "Unique mount points: $MOUNT_POINTS"
+
+for point in $MOUNT_POINTS; do
+    [ -z "$point" ] && continue
+    ui_print "  -> $point"
+    if mount_rw "$point"; then
+        ui_print "    [OK] $point writable"
+    else
+        ui_print "    [WARN] $point still RO"
+    fi
+done
+
+if ! touch "$REAL_SYSTEM/test_write" 2>/dev/null; then
+    ui_print "  [WARN] System not writable, attempting force remount"
+    mount -o rw,remount / 2>/dev/null
+    mount -o rw,remount /system_root 2>/dev/null
+    mount -o rw,remount /system 2>/dev/null
+fi
+rm -f "$REAL_SYSTEM/test_write" 2>/dev/null
+
 log ""
-log "Step 2/6: Checking free space"
+log "Step 2/5: Checking free space"
 ui_print " "
-ui_print "Step 2/6: Checking free space"
+ui_print "Step 2/5: Checking free space"
 
 for point in $MOUNT_POINTS; do
     if [ -n "$point" ] && [ -d "$point" ]; then
         FREE=$(df -k "$point" 2>/dev/null | tail -1 | awk '{print $4}')
         if [ -n "$FREE" ]; then
             ui_print "  -> $point: ${FREE}KB free"
-            log "  $point: ${FREE}KB free"
+            log "$point: ${FREE}KB free"
         fi
     fi
 done
 
 log ""
-log "Step 3/6: Extracting delete list from ZIP"
+log "Step 3/5: Removing GAPPS files"
 ui_print " "
-ui_print "Step 3/6: Extracting delete list from ZIP"
+ui_print "Step 3/5: Removing GAPPS files"
 
 TMPDIR=/tmp/gapps_to_vanilla
 rm -rf $TMPDIR
@@ -285,192 +295,199 @@ mkdir -p $TMPDIR
 cd $TMPDIR
 
 unzip -o "$ZIPFILE" 'delete.list' -d . > /dev/null 2>&1
-if [ -f "delete.list" ]; then
+
+if [ ! -f "delete.list" ]; then
+    log "delete.list not found"
+    ui_print "WARNING: delete.list not found"
+    touch /tmp/delete.list
+else
     cp delete.list /tmp/delete.list
     DELETE_COUNT=$(wc -l < /tmp/delete.list)
-    log "  Found $DELETE_COUNT items to remove"
-    ui_print "  Found $DELETE_COUNT items to remove"
-else
-    touch /tmp/delete.list
-    log "  WARNING: delete.list not found in ZIP!"
-    ui_print "  WARNING: delete.list not found!"
+    log "Found $DELETE_COUNT items to remove"
+    ui_print "Found $DELETE_COUNT items to remove"
 fi
 
-log ""
-log "Step 4/6: Removing GAPPS files"
-ui_print " "
-ui_print "Step 4/6: Removing GAPPS files"
-
-# Function to find and delete trying ALL possible paths
 delete_item() {
     local target="$1"
+    local clean="${target#/}"
     
-    # All possible base paths to search
-    local bases="$FOUND_SYSTEM $FOUND_PRODUCT $FOUND_SYSTEM_EXT $SYSTEM_ROOT_MOUNT /system_root /system /product /system_ext"
-    
-    local clean_target="${target#/}"
+    local bases="
+        $REAL_SYSTEM
+        $REAL_PRODUCT
+        $REAL_SYSTEM_EXT
+        $REAL_VENDOR
+        $REAL_ODM
+    "
     
     for base in $bases; do
         [ -z "$base" ] && continue
+        [ ! -d "$base" ] && continue
         
-        # Try multiple path combinations
-        for try_path in \
-            "$base/$clean_target" \
-            "$base/system/$clean_target" \
-            "${base}${target}"
-        do
-            # Normalize path
-            try_path=$(echo "$try_path" | sed 's|//*|/|g')
-            
-            if [ -d "$try_path" ]; then
-                log "  Found directory: $try_path"
-                rm -rf "$try_path"
-                if [ ! -d "$try_path" ]; then
-                    log "  [DELETED] $try_path/ (directory)"
-                    return 2
-                fi
-            elif [ -f "$try_path" ]; then
-                log "  Found file: $try_path"
-                rm -f "$try_path"
-                if [ ! -f "$try_path" ]; then
-                    log "  [DELETED] $try_path"
-                    return 1
-                fi
+        local path="$base/$clean"
+        path=$(echo "$path" | sed 's|//*|/|g')
+        
+        if [ -d "$path" ]; then
+            log "Found dir: $path"
+            rm -rf "$path" 2>/dev/null
+            if [ ! -d "$path" ]; then
+                log "Deleted dir: $path"
+                return 2
             fi
-        done
+        elif [ -f "$path" ]; then
+            log "Found file: $path"
+            rm -f "$path" 2>/dev/null
+            if [ ! -f "$path" ]; then
+                log "Deleted file: $path"
+                return 1
+            fi
+        fi
     done
     
-    log "  [NOT FOUND] $target"
+    log "Not found: $target"
     return 0
 }
 
+DELETED_FILES=0
+DELETED_DIRS=0
+NOT_FOUND=0
+
 if [ -s "/tmp/delete.list" ]; then
-    DELETED_FILES=0
-    DELETED_DIRS=0
-    NOT_FOUND=0
-    
     while IFS= read -r path; do
-        if [ -n "$path" ]; then
-            delete_item "$path"
-            RESULT=$?
-            
-            if [ $RESULT -eq 1 ]; then
-                DELETED_FILES=$((DELETED_FILES + 1))
-                ui_print "  [DELETED] $path"
-            elif [ $RESULT -eq 2 ]; then
-                DELETED_DIRS=$((DELETED_DIRS + 1))
-                ui_print "  [DELETED] $path/ (directory)"
-            else
-                NOT_FOUND=$((NOT_FOUND + 1))
-                ui_print "  [NOT FOUND] $path"
-            fi
-        fi
+        [ -z "$path" ] && continue
+        delete_item "$path"
+        case $? in
+            1) DELETED_FILES=$((DELETED_FILES + 1)) ;;
+            2) DELETED_DIRS=$((DELETED_DIRS + 1)) ;;
+            *) NOT_FOUND=$((NOT_FOUND + 1)) ;;
+        esac
     done < "/tmp/delete.list"
     
-    log ""
-    log "  Summary:"
-    log "    Files deleted: $DELETED_FILES"
-    log "    Directories deleted: $DELETED_DIRS"
-    log "    Not found: $NOT_FOUND"
-    
+    log "Files deleted: $DELETED_FILES, Dirs deleted: $DELETED_DIRS, Not found: $NOT_FOUND"
     ui_print " "
-    ui_print "  Summary:"
-    ui_print "    Files deleted: $DELETED_FILES"
-    ui_print "    Directories deleted: $DELETED_DIRS"
-    if [ $NOT_FOUND -gt 0 ]; then
-        ui_print "    Not found: $NOT_FOUND"
-    fi
+    ui_print "Summary:"
+    ui_print "  Files deleted: $DELETED_FILES"
+    ui_print "  Directories deleted: $DELETED_DIRS"
+    [ $NOT_FOUND -gt 0 ] && ui_print "  Not found: $NOT_FOUND"
 else
-    log "  Nothing to remove"
-    ui_print "  Nothing to remove"
+    log "Nothing to remove"
+    ui_print "Nothing to remove"
 fi
 
 log ""
-log "Step 5/6: Extracting and restoring VANILLA files"
+log "Step 4/5: Restoring VANILLA files"
 ui_print " "
-ui_print "Step 5/6: Extracting and restoring VANILLA files"
+ui_print "Step 4/5: Restoring VANILLA files"
 
 cd $TMPDIR
-unzip -o "$ZIPFILE" 'system/*' 'system_ext/*' 'product/*' -d . > /dev/null 2>&1
 
-for dir in system system_ext product; do
+unzip -o "$ZIPFILE" -d . > /dev/null 2>&1
+
+log "Extracted contents:"
+for dir in system system_ext product vendor odm; do
     if [ -d "$dir" ]; then
-        COUNT=$(find $dir -type f 2>/dev/null | wc -l)
-        log "  $dir/: $COUNT files to restore"
-        ui_print "  $dir/: $COUNT files to restore"
+        COUNT=$(find "$dir" -type f 2>/dev/null | wc -l)
+        log "$dir: $COUNT files"
+        ui_print "Extracted $dir: $COUNT files"
+    else
+        log "$dir: not found in ZIP"
     fi
 done
 
 TOTAL_RESTORED=0
 TOTAL_FAILED=0
 
-for dir in system system_ext product; do
-    if [ -d "$TMPDIR/$dir" ]; then
-        case $dir in
-            system) MOUNT_POINT="$FOUND_SYSTEM" ;;
-            system_ext) MOUNT_POINT="$FOUND_SYSTEM_EXT" ;;
-            product) MOUNT_POINT="$FOUND_PRODUCT" ;;
-        esac
-        
-        if [ -z "$MOUNT_POINT" ]; then
-            log "  Skipping $dir: no mount point"
-            continue
-        fi
-        
-        log "  -> Restoring $dir to $MOUNT_POINT..."
-        ui_print "  -> Restoring $dir..."
-        
-        cd "$TMPDIR/$dir"
-        find . -type f | while IFS= read -r file; do
-            TARGET="$MOUNT_POINT/${file#./}"
-            TARGET_DIR=$(dirname "$TARGET")
-            mkdir -p "$TARGET_DIR"
-            if cp -f "$file" "$TARGET"; then
-                chmod --reference="$file" "$TARGET" 2>/dev/null || chmod 644 "$TARGET"
-                log "    + ${file#./}"
-                echo "RESTORED" >> /tmp/restore_status.txt
-            else
-                log "    FAILED: ${file#./}"
-                echo "FAILED" >> /tmp/restore_status.txt
-            fi
-        done
-        
-        if [ -f /tmp/restore_status.txt ]; then
-            RESTORED=$(grep -c 'RESTORED' /tmp/restore_status.txt)
-            FAILED=$(grep -c 'FAILED' /tmp/restore_status.txt)
-            TOTAL_RESTORED=$((TOTAL_RESTORED + RESTORED))
-            TOTAL_FAILED=$((TOTAL_FAILED + FAILED))
-            rm -f /tmp/restore_status.txt
-        fi
-        
-        log "    $dir: $RESTORED restored, $FAILED failed"
-        ui_print "    $dir: $RESTORED restored"
-        if [ $FAILED -gt 0 ]; then
-            ui_print "    $dir: $FAILED FAILED!"
-        fi
+restore_dir() {
+    local src_dir="$1"
+    local name="$2"
+    
+    if [ ! -d "$src_dir" ]; then
+        log "SKIP $name - source not found"
+        return 0
     fi
-done
+    
+    local target_base=""
+    case "$name" in
+        system) target_base="$REAL_SYSTEM" ;;
+        product) target_base="$REAL_PRODUCT" ;;
+        system_ext) target_base="$REAL_SYSTEM_EXT" ;;
+        vendor) target_base="$REAL_VENDOR" ;;
+        odm) target_base="$REAL_ODM" ;;
+    esac
+    
+    if [ -z "$target_base" ] || [ ! -d "$target_base" ]; then
+        log "SKIP $name - target not found: $target_base"
+        return 0
+    fi
+    
+    log "Restoring $name to $target_base"
+    ui_print "Restoring $name to $target_base"
+    
+    cd "$src_dir"
+    find . -type f 2>/dev/null | while read -r file; do
+        dest="$target_base/${file#./}"
+        dest_dir=$(dirname "$dest")
+        mkdir -p "$dest_dir" 2>/dev/null
+        if cp -f "$file" "$dest" 2>/dev/null; then
+            chmod 644 "$dest" 2>/dev/null
+            chcon --reference="$src_dir/${file#./}" "$dest" 2>/dev/null
+            echo "OK" >> /tmp/restore_status.txt
+        else
+            log "FAILED: ${file#./}"
+            echo "FAIL" >> /tmp/restore_status.txt
+        fi
+    done
+    
+    if [ -f /tmp/restore_status.txt ]; then
+        ok=$(grep -c 'OK' /tmp/restore_status.txt 2>/dev/null || echo 0)
+        fail=$(grep -c 'FAIL' /tmp/restore_status.txt 2>/dev/null || echo 0)
+        TOTAL_RESTORED=$((TOTAL_RESTORED + ok))
+        TOTAL_FAILED=$((TOTAL_FAILED + fail))
+        rm -f /tmp/restore_status.txt
+        log "$name: $ok restored, $fail failed"
+        ui_print "$name: $ok restored, $fail failed"
+    fi
+    
+    cd /
+}
+
+if [ -d "$TMPDIR/system" ]; then
+    restore_dir "$TMPDIR/system" "system"
+fi
+
+if [ -d "$TMPDIR/product" ]; then
+    restore_dir "$TMPDIR/product" "product"
+fi
+
+if [ -d "$TMPDIR/system_ext" ]; then
+    restore_dir "$TMPDIR/system_ext" "system_ext"
+fi
+
+if [ -d "$TMPDIR/vendor" ]; then
+    restore_dir "$TMPDIR/vendor" "vendor"
+fi
+
+if [ -d "$TMPDIR/odm" ]; then
+    restore_dir "$TMPDIR/odm" "odm"
+fi
 
 log ""
-log "Step 6/6: Cleanup"
+log "Step 5/5: Cleanup"
 ui_print " "
-ui_print "Step 6/6: Cleanup"
+ui_print "Step 5/5: Cleanup"
 
 rm -rf /tmp/gapps_to_vanilla /tmp/delete.list /tmp/restore_status.txt
 
 log ""
 log "========================================="
-log "Installation complete!"
-log "  Files restored: $TOTAL_RESTORED"
-log "  Files failed: $TOTAL_FAILED"
-log "  GAPPS items deleted: $((DELETED_FILES + DELETED_DIRS))"
-log "  Not found: $NOT_FOUND"
-log "Finished: $(date)"
+log "Installation complete"
+log "Files restored: $TOTAL_RESTORED"
+log "Files failed: $TOTAL_FAILED"
+log "GAPPS deleted: $((DELETED_FILES + DELETED_DIRS))"
 log "========================================="
 
 ui_print " "
 ui_print "========================================="
-ui_print "Installation complete!"
+ui_print "Installation complete"
 ui_print " "
 ui_print "GAPPS removed, VANILLA AOSP restored"
 ui_print " "
