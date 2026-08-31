@@ -44,17 +44,29 @@ jobs:
         run: |
           if [[ -n "${{ github.event.inputs.source_api_url }}" ]]; then
             INPUT_URL="${{ github.event.inputs.source_api_url }}"
-            if echo "$INPUT_URL" | grep -q 'github.com'; then
+            SOURCE_URL="$INPUT_URL"
+            
+            if echo "$INPUT_URL" | grep -q 'api.github.com'; then
+              REPO_PATH=$(echo "$INPUT_URL" | sed 's|https://api.github.com/repos/||' | sed 's|/releases$||' | sed 's|/$||')
+              API_URL="$INPUT_URL"
+              SOURCE_URL="https://github.com/${REPO_PATH}/releases"
+            elif echo "$INPUT_URL" | grep -q 'github.com'; then
               CLEAN_URL=$(echo "$INPUT_URL" | sed 's|/$||' | sed 's|/releases$||')
               REPO_PATH=$(echo "$CLEAN_URL" | sed 's|https://github.com/||')
               API_URL="https://api.github.com/repos/${REPO_PATH}/releases"
+              SOURCE_URL="https://github.com/${REPO_PATH}/releases"
             else
               API_URL="$INPUT_URL"
+              SOURCE_URL="$INPUT_URL"
             fi
+            
             echo "api_url=$API_URL" >> $GITHUB_OUTPUT
+            echo "source_url=$SOURCE_URL" >> $GITHUB_OUTPUT
             echo "Using API URL: $API_URL"
+            echo "Source URL: $SOURCE_URL"
           else
             echo "api_url=${{ env.DEFAULT_API_URL }}" >> $GITHUB_OUTPUT
+            echo "source_url=https://github.com/Doze-off/ProjectInfinity-X_gsi/releases" >> $GITHUB_OUTPUT
           fi
 
       - name: Install dependencies
@@ -211,10 +223,8 @@ jobs:
             
             RELEASE_NAME=$(echo "$RELEASE_DATA" | jq -r '.name')
             
-            # Get all assets and categorize them using bash instead of jq
             echo "  Analyzing assets for pairing..."
             
-            # Extract asset information using jq but in a simpler way
             GAPPS_ASSETS=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("GAPPS"; "i")) | "\(.name)|\(.browser_download_url)|\(.size)"')
             VANILLA_ASSETS=$(echo "$RELEASE_DATA" | jq -r '.assets[] | select(.name | test("VANILLA"; "i")) | "\(.name)|\(.browser_download_url)|\(.size)"')
             
@@ -229,14 +239,12 @@ jobs:
               continue
             fi
             
-            # Function to extract metadata from filename
             extract_metadata() {
               local filename="$1"
               local arch="arm64"
               local fs="ext4"
               local ext=".img.xz"
               
-              # Extract architecture
               if [[ "$filename" =~ arm64 ]]; then
                 arch="arm64"
               elif [[ "$filename" =~ arm32 ]]; then
@@ -245,7 +253,6 @@ jobs:
                 arch="arm"
               fi
               
-              # Extract filesystem
               if [[ "$filename" =~ erofs ]]; then
                 fs="erofs"
               elif [[ "$filename" =~ ext4 ]]; then
@@ -254,7 +261,6 @@ jobs:
                 fs="ext"
               fi
               
-              # Extract extension
               if [[ "$filename" =~ \.img\.xz$ ]]; then
                 ext=".img.xz"
               elif [[ "$filename" =~ \.img\.gz$ ]]; then
@@ -268,7 +274,6 @@ jobs:
               echo "$arch|$fs|$ext"
             }
             
-            # Process GAPPS assets with metadata
             GAPPS_ARRAY=()
             while IFS='|' read -r name url size; do
               if [[ -n "$name" ]]; then
@@ -278,7 +283,6 @@ jobs:
               fi
             done <<< "$GAPPS_ASSETS"
             
-            # Process VANILLA assets with metadata
             VANILLA_ARRAY=()
             while IFS='|' read -r name url size; do
               if [[ -n "$name" ]]; then
@@ -288,7 +292,6 @@ jobs:
               fi
             done <<< "$VANILLA_ASSETS"
             
-            # Find best matching pair
             best_score=-1
             best_gapps=""
             best_vanilla=""
@@ -299,15 +302,12 @@ jobs:
               for vanilla_item in "${VANILLA_ARRAY[@]}"; do
                 IFS='|' read -r vanilla_name vanilla_url vanilla_size vanilla_arch vanilla_fs vanilla_ext <<< "$vanilla_item"
                 
-                # Calculate score
                 score=0
                 
-                # 1. Same extension is REQUIRED
                 if [[ "$gapps_ext" != "$vanilla_ext" ]]; then
                   continue
                 fi
                 
-                # 2. Same architecture (arm64 preferred)
                 if [[ "$gapps_arch" == "$vanilla_arch" ]]; then
                   if [[ "$gapps_arch" == "arm64" ]]; then
                     score=$((score + 100))
@@ -318,7 +318,6 @@ jobs:
                   score=$((score + 30))
                 fi
                 
-                # 3. Same filesystem (ext4 preferred)
                 if [[ "$gapps_fs" == "$vanilla_fs" ]]; then
                   if [[ "$gapps_fs" == "ext4" || "$gapps_fs" == "ext" ]]; then
                     score=$((score + 50))
@@ -329,7 +328,6 @@ jobs:
                   score=$((score + 10))
                 fi
                 
-                # 4. Similar size
                 size_diff=$((gapps_size - vanilla_size))
                 if [[ $size_diff -lt 0 ]]; then
                   size_diff=$(( -size_diff ))
@@ -344,7 +342,6 @@ jobs:
                   fi
                 fi
                 
-                # 5. GAPPS should be larger than VANILLA
                 if [[ $gapps_size -gt $vanilla_size ]]; then
                   score=$((score + 15))
                 fi
@@ -363,7 +360,6 @@ jobs:
               continue
             fi
             
-            # Extract chosen pair
             IFS='|' read -r GAPPS_NAME GAPPS_URL GAPPS_SIZE GAPPS_ARCH GAPPS_FS GAPPS_EXT <<< "$best_gapps"
             IFS='|' read -r VANILLA_NAME VANILLA_URL VANILLA_SIZE VANILLA_ARCH VANILLA_FS VANILLA_EXT <<< "$best_vanilla"
             
@@ -552,16 +548,20 @@ jobs:
           
           echo -e "$ALL_ZIPS_LIST" > ${{ env.WORK_DIR }}/all_zips_list.txt
           
+          TOTAL_FILES=$(wc -l < "$TEMP_LIST")
+          
           echo ""
           echo "========================================="
           echo "Batch complete!"
           echo "  Processed: $PROCESSED"
           echo "  Skipped: $SKIPPED"
+          echo "  Total files: $TOTAL_FILES"
           
           GENERATED_DATE=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
           
           echo "processed=$PROCESSED" >> $GITHUB_OUTPUT
           echo "skipped=$SKIPPED" >> $GITHUB_OUTPUT
+          echo "total_files=$TOTAL_FILES" >> $GITHUB_OUTPUT
           echo "generated_date=$GENERATED_DATE" >> $GITHUB_OUTPUT
           
           echo "all_zips_list<<ALLZIPSEOF" >> $GITHUB_OUTPUT
@@ -584,9 +584,9 @@ jobs:
           cat > ${{ env.WORK_DIR }}/release_body.md << 'EOF'
           ## gapps-to-vanilla
     
-          **Source:** ${{ steps.set_api.outputs.api_url }}
+          **Source:** ${{ steps.set_api.outputs.source_url }}
           **Generated:** ${{ steps.process_releases.outputs.generated_date }}
-          **Versions:** ${{ steps.process_releases.outputs.processed }}
+          **Versions:** ${{ steps.process_releases.outputs.total_files }}
     
           ### Downloads
     
@@ -599,7 +599,6 @@ jobs:
           3. Reboot system
           EOF
     
-          # Create or update release
           if gh release view "$RELEASE_TAG_NAME" --repo "${{ github.repository }}" &>/dev/null; then
             echo "Release exists. Updating..."
             gh release edit "$RELEASE_TAG_NAME" \
@@ -614,7 +613,6 @@ jobs:
               --repo "${{ github.repository }}"
           fi
     
-          # Upload ZIPs with overwrite
           echo "Uploading ZIPs..."
           for zip in ${{ env.WORK_DIR }}/output/*.zip; do
             if [[ -f "$zip" ]]; then
@@ -630,9 +628,9 @@ jobs:
         run: |
           echo "## gapps-to-vanilla" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Source:** ${{ steps.set_api.outputs.api_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Source:** ${{ steps.set_api.outputs.source_url }}" >> $GITHUB_STEP_SUMMARY
           echo "**Generated:** ${{ steps.process_releases.outputs.generated_date }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Versions:** ${{ steps.process_releases.outputs.processed }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Versions:** ${{ steps.process_releases.outputs.total_files }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Downloads" >> $GITHUB_STEP_SUMMARY
           cat ${{ env.WORK_DIR }}/all_zips_list.txt >> $GITHUB_STEP_SUMMARY
