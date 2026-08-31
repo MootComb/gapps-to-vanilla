@@ -601,6 +601,8 @@ if [ $INSTALL_MODE -eq 1 ]; then
         priv-app/GoogleDialer
         priv-app/PrebuiltBugle
         priv-app/PrebuiltDeskClockGoogle_76007351
+        priv-app/LineageSetupWizard
+        priv-app/SoundPicker
     "
     
     for app in $EXTRA_APPS; do
