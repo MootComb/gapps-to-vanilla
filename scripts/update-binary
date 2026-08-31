@@ -3,6 +3,8 @@
 OUTFD=$2
 ZIPFILE=$3
 
+FORCE_ACTION=2
+
 LOG_FILE="/tmp/gapps-to-vanilla.log"
 
 log() {
@@ -36,120 +38,265 @@ ui_print "   Remove GAPPS and restore AOSP"
 ui_print "========================================="
 ui_print " "
 
-log "========== PARTITION DETECTION =========="
-
-get_mount_point() {
-    local path="$1"
-    if mount | grep -q " $path "; then
-        echo "$path"
+check_volume_keys() {
+    local timeout=5
+    local count=0
+    
+    ui_print "========================================="
+    ui_print "SELECT INSTALLATION MODE:"
+    ui_print " "
+    ui_print "Volume UP: Full restore (with Google apps)"
+    ui_print "Volume DOWN: Minimal restore (remove extra Google apps)"
+    ui_print " "
+    ui_print "Extra apps to remove with Volume DOWN:"
+    ui_print "  - LineageSetupWizard"
+    ui_print "  - GoogleDialer"
+    ui_print "  - PrebuiltBugle (Messages)"
+    ui_print "  - PrebuiltDeskClockGoogle (Clock)"
+    ui_print " "
+    ui_print "Waiting $timeout seconds..."
+    ui_print "Default: Volume UP (if no key pressed)"
+    ui_print "========================================="
+    
+    if [ ! -f /dev/input/event1 ] && [ ! -f /dev/input/event0 ]; then
+        log "No input devices found, using default (Volume UP)"
         return 0
     fi
-    local current="$path"
-    while [ "$current" != "/" ] && [ "$current" != "." ]; do
-        current=$(dirname "$current")
-        if mount | grep -q " $current "; then
-            echo "$current"
-            return 0
+    
+    local vol_event=""
+    for event in /dev/input/event*; do
+        if getevent -l "$event" 2>/dev/null | grep -q "KEY_VOLUME"; then
+            vol_event="$event"
+            break
         fi
     done
-    echo ""
-    return 1
+    
+    if [ -z "$vol_event" ]; then
+        log "Volume keys not detected, using default (Volume UP)"
+        return 0
+    fi
+    
+    log "Using volume key event: $vol_event"
+    
+    local start_time=$(date +%s)
+    local current_time=$start_time
+    local key_pressed=""
+    
+    while [ $((current_time - start_time)) -lt $timeout ]; do
+        local event=$(timeout 1 getevent -l "$vol_event" 2>/dev/null | grep -E "KEY_VOLUMEUP|KEY_VOLUMEDOWN" | head -1)
+        
+        if [ -n "$event" ]; then
+            if echo "$event" | grep -q "KEY_VOLUMEUP.*DOWN"; then
+                key_pressed="UP"
+                log "Volume UP pressed"
+                break
+            elif echo "$event" | grep -q "KEY_VOLUMEDOWN.*DOWN"; then
+                key_pressed="DOWN"
+                log "Volume DOWN pressed"
+                break
+            fi
+        fi
+        
+        current_time=$(date +%s)
+    done
+    
+    if [ -z "$key_pressed" ]; then
+        log "No key pressed, using default (Volume UP)"
+        ui_print "No key pressed, using default: Volume UP"
+        return 0
+    elif [ "$key_pressed" = "UP" ]; then
+        ui_print "Volume UP selected: Full restore"
+        return 0
+    else
+        ui_print "Volume DOWN selected: Minimal restore"
+        return 1
+    fi
 }
 
-get_device() {
-    local path="$1"
-    mount | grep " $path " | awk '{print $1}'
+INSTALL_MODE=0
+
+if [ $FORCE_ACTION -eq 0 ]; then
+    if check_volume_keys; then
+        INSTALL_MODE=0
+        log "Selected mode: Full restore (Volume UP)"
+    else
+        INSTALL_MODE=1
+        log "Selected mode: Minimal restore (Volume DOWN)"
+    fi
+elif [ $FORCE_ACTION -eq 1 ]; then
+    INSTALL_MODE=0
+    log "Forced mode: Full restore (Volume UP)"
+    ui_print "Forced mode: Full restore (with Google apps)"
+elif [ $FORCE_ACTION -eq 2 ]; then
+    INSTALL_MODE=1
+    log "Forced mode: Minimal restore (Volume DOWN)"
+    ui_print "Forced mode: Minimal restore (remove extra Google apps)"
+else
+    INSTALL_MODE=0
+    log "Unknown FORCE_ACTION value, using default (Full restore)"
+fi
+
+log "Installation mode: $INSTALL_MODE (0=Full, 1=Minimal)"
+ui_print " "
+
+log "========== PARTITION DETECTION =========="
+
+check_dir() {
+    [ -d "$1" ] && return 0 || return 1
+}
+
+check_file() {
+    [ -f "$1" ] && return 0 || return 1
+}
+
+is_symlink() {
+    [ -L "$1" ] && return 0 || return 1
 }
 
 find_system() {
-    if [ -d "/system_root/system" ] && [ -d "/system_root/system/app" ]; then
+    log "Searching for system partition..."
+    
+    if check_dir "/system_root/system/app" && check_file "/system_root/system/build.prop"; then
+        log "Found system at /system_root/system"
         echo "/system_root/system"
         return 0
     fi
-    if [ -d "/system_root" ] && [ -d "/system_root/app" ]; then
+    
+    if check_dir "/system_root/app" && check_file "/system_root/build.prop"; then
+        log "Found system at /system_root"
         echo "/system_root"
         return 0
     fi
-    if [ -d "/system" ] && [ -d "/system/app" ]; then
+    
+    if check_dir "/system/app" && check_file "/system/build.prop"; then
+        log "Found system at /system"
         echo "/system"
         return 0
     fi
-    if [ -d "/mnt/system" ] && [ -d "/mnt/system/app" ]; then
+    
+    if check_dir "/mnt/system/app" && check_file "/mnt/system/build.prop"; then
+        log "Found system at /mnt/system"
         echo "/mnt/system"
         return 0
     fi
+    
+    log "System partition not found"
     echo ""
     return 1
 }
 
 find_product() {
-    if [ -d "/system_root/product" ] && [ -d "/system_root/product/app" ]; then
-        echo "/system_root/product"
-        return 0
-    fi
-    if [ -d "/product" ] && [ -d "/product/app" ]; then
+    log "Searching for product partition..."
+    
+    if mount | grep -q " /product " && check_dir "/product/app"; then
+        log "Found product at /product (separate mount)"
         echo "/product"
         return 0
     fi
-    if [ -d "/system/product" ] && [ -d "/system/product/app" ]; then
+    
+    if check_dir "/system_root/system/product/app" && ! is_symlink "/system_root/system/product"; then
+        log "Found product at /system_root/system/product"
+        echo "/system_root/system/product"
+        return 0
+    fi
+    
+    if check_dir "/system/product/app" && ! is_symlink "/system/product"; then
+        log "Found product at /system/product"
         echo "/system/product"
         return 0
     fi
+    
+    if check_dir "/product/app"; then
+        log "Found product at /product"
+        echo "/product"
+        return 0
+    fi
+    
+    log "Product partition not found"
     echo ""
     return 1
 }
 
 find_system_ext() {
-    if [ -d "/system_root/system_ext" ] && [ -d "/system_root/system_ext/app" ]; then
-        echo "/system_root/system_ext"
-        return 0
-    fi
-    if [ -d "/system_root/system/system_ext" ] && [ -d "/system_root/system/system_ext/app" ]; then
-        echo "/system_root/system/system_ext"
-        return 0
-    fi
-    if [ -d "/system_ext" ] && [ -d "/system_ext/app" ]; then
+    log "Searching for system_ext partition..."
+    
+    if mount | grep -q " /system_ext " && check_dir "/system_ext/app"; then
+        log "Found system_ext at /system_ext (separate mount)"
         echo "/system_ext"
         return 0
     fi
-    if [ -d "/system/system_ext" ] && [ -d "/system/system_ext/app" ]; then
+    
+    if check_dir "/system_root/system/system_ext/app" && ! is_symlink "/system_root/system/system_ext"; then
+        log "Found system_ext at /system_root/system/system_ext"
+        echo "/system_root/system/system_ext"
+        return 0
+    fi
+    
+    if check_dir "/system/system_ext/app" && ! is_symlink "/system/system_ext"; then
+        log "Found system_ext at /system/system_ext"
         echo "/system/system_ext"
         return 0
     fi
+    
+    if check_dir "/system_ext/app"; then
+        log "Found system_ext at /system_ext"
+        echo "/system_ext"
+        return 0
+    fi
+    
+    log "system_ext partition not found"
     echo ""
     return 1
 }
 
 find_vendor() {
-    if [ -d "/system_root/vendor" ]; then
-        echo "/system_root/vendor"
-        return 0
-    fi
-    if [ -d "/vendor" ]; then
+    log "Searching for vendor partition..."
+    
+    if mount | grep -q " /vendor " && check_dir "/vendor"; then
+        log "Found vendor at /vendor (separate mount)"
         echo "/vendor"
         return 0
     fi
-    if [ -d "/system/vendor" ]; then
-        echo "/system/vendor"
+    
+    if check_dir "/system_root/system/vendor" && ! is_symlink "/system_root/system/vendor"; then
+        log "Found vendor at /system_root/system/vendor"
+        echo "/system_root/system/vendor"
         return 0
     fi
+    
+    if check_dir "/vendor"; then
+        log "Found vendor at /vendor"
+        echo "/vendor"
+        return 0
+    fi
+    
+    log "Vendor partition not found"
     echo ""
     return 1
 }
 
 find_odm() {
-    if [ -d "/system_root/odm" ]; then
-        echo "/system_root/odm"
-        return 0
-    fi
-    if [ -d "/odm" ]; then
+    log "Searching for odm partition..."
+    
+    if mount | grep -q " /odm " && check_dir "/odm"; then
+        log "Found odm at /odm (separate mount)"
         echo "/odm"
         return 0
     fi
-    if [ -d "/system/odm" ]; then
-        echo "/system/odm"
+    
+    if check_dir "/system_root/odm" && ! is_symlink "/system_root/odm"; then
+        log "Found odm at /system_root/odm"
+        echo "/system_root/odm"
         return 0
     fi
+    
+    if check_dir "/odm"; then
+        log "Found odm at /odm"
+        echo "/odm"
+        return 0
+    fi
+    
+    log "ODM partition not found"
     echo ""
     return 1
 }
@@ -170,22 +317,63 @@ REAL_SYSTEM_EXT="$SYSTEM_EXT_PATH"
 REAL_VENDOR="$VENDOR_PATH"
 REAL_ODM="$ODM_PATH"
 
+log "Final partition paths:"
 log "REAL_SYSTEM: $REAL_SYSTEM"
 log "REAL_PRODUCT: $REAL_PRODUCT"
 log "REAL_SYSTEM_EXT: $REAL_SYSTEM_EXT"
 log "REAL_VENDOR: $REAL_VENDOR"
 log "REAL_ODM: $REAL_ODM"
 
-ui_print "Found system: $REAL_SYSTEM"
-[ -n "$REAL_PRODUCT" ] && ui_print "Found product: $REAL_PRODUCT"
-[ -n "$REAL_SYSTEM_EXT" ] && ui_print "Found system_ext: $REAL_SYSTEM_EXT"
+ui_print "Found partitions:"
+ui_print "  System: $REAL_SYSTEM"
+[ -n "$REAL_PRODUCT" ] && ui_print "  Product: $REAL_PRODUCT"
+[ -n "$REAL_SYSTEM_EXT" ] && ui_print "  System_ext: $REAL_SYSTEM_EXT"
+[ -n "$REAL_VENDOR" ] && ui_print "  Vendor: $REAL_VENDOR"
+[ -n "$REAL_ODM" ] && ui_print "  ODM: $REAL_ODM"
 
 ui_print " "
 ui_print "Step 1/5: Mounting partitions RW"
 log "Step 1/5: Mounting partitions RW"
 
 is_rw() {
-    mount | grep " $1 " | grep -q 'rw,'
+    local mount_point="$1"
+    mount | grep " $mount_point " | grep -q 'rw,'
+    return $?
+}
+
+get_mount_point() {
+    local path="$1"
+    
+    if mount | grep -q " $path "; then
+        echo "$path"
+        return 0
+    fi
+    
+    case "$path" in
+        /system_root*)
+            if mount | grep -q " /system_root "; then
+                echo "/system_root"
+                return 0
+            fi
+            ;;
+    esac
+    
+    local current="$path"
+    while [ "$current" != "/" ] && [ "$current" != "." ]; do
+        current=$(dirname "$current")
+        if mount | grep -q " $current "; then
+            echo "$current"
+            return 0
+        fi
+    done
+    
+    echo ""
+    return 1
+}
+
+get_device() {
+    local mount_point="$1"
+    mount | grep " $mount_point " | awk '{print $1}' | head -1
 }
 
 mount_rw() {
@@ -224,13 +412,22 @@ mount_rw() {
         return 0
     fi
     
-    if [ "$mount_point" = "/" ] || [ "$mount_point" = "/system_root" ]; then
-        mount -o rw,remount / 2>/dev/null
-        if is_rw "$mount_point"; then
-            log "RW mounted via root"
-            return 0
-        fi
-    fi
+    case "$mount_point" in
+        /system_root)
+            mount -o rw,remount /system_root 2>/dev/null
+            if is_rw "$mount_point"; then
+                log "RW mounted via /system_root"
+                return 0
+            fi
+            ;;
+        /)
+            mount -o rw,remount / 2>/dev/null
+            if is_rw "$mount_point"; then
+                log "RW mounted via root"
+                return 0
+            fi
+            ;;
+    esac
     
     log "Failed to mount RW for $mount_point"
     return 1
@@ -241,9 +438,9 @@ MOUNT_POINTS=""
 for path in "$REAL_SYSTEM" "$REAL_PRODUCT" "$REAL_SYSTEM_EXT" "$REAL_VENDOR" "$REAL_ODM"; do
     if [ -n "$path" ] && [ -d "$path" ]; then
         mp=$(get_mount_point "$path")
-        if [ -n "$mp" ] && [ "$mp" != "/" ]; then
+        if [ -n "$mp" ]; then
             MOUNT_POINTS="$MOUNT_POINTS $mp"
-            log "Will mount: $mp"
+            log "Will mount: $mp for $path"
         fi
     fi
 done
@@ -253,7 +450,7 @@ log "Unique mount points: $MOUNT_POINTS"
 
 for point in $MOUNT_POINTS; do
     [ -z "$point" ] && continue
-    ui_print "  -> $point"
+    ui_print "  Mounting: $point"
     if mount_rw "$point"; then
         ui_print "    [OK] $point writable"
     else
@@ -263,9 +460,9 @@ done
 
 if ! touch "$REAL_SYSTEM/test_write" 2>/dev/null; then
     ui_print "  [WARN] System not writable, attempting force remount"
-    mount -o rw,remount / 2>/dev/null
     mount -o rw,remount /system_root 2>/dev/null
     mount -o rw,remount /system 2>/dev/null
+    mount -o rw,remount / 2>/dev/null
 fi
 rm -f "$REAL_SYSTEM/test_write" 2>/dev/null
 
@@ -286,6 +483,7 @@ done
 
 log ""
 log "Step 3/5: Removing GAPPS files"
+log "========================================="
 ui_print " "
 ui_print "Step 3/5: Removing GAPPS files"
 
@@ -307,17 +505,23 @@ else
     ui_print "Found $DELETE_COUNT items to remove"
 fi
 
+DELETE_LOG="/tmp/deleted_files.log"
+> "$DELETE_LOG"
+
 delete_item() {
     local target="$1"
     local clean="${target#/}"
     
-    local bases="
-        $REAL_SYSTEM
-        $REAL_PRODUCT
-        $REAL_SYSTEM_EXT
-        $REAL_VENDOR
-        $REAL_ODM
-    "
+    local bases=""
+    
+    [ -n "$REAL_SYSTEM" ] && bases="$bases $REAL_SYSTEM"
+    [ -n "$REAL_PRODUCT" ] && bases="$bases $REAL_PRODUCT"
+    [ -n "$REAL_SYSTEM_EXT" ] && bases="$bases $REAL_SYSTEM_EXT"
+    [ -n "$REAL_VENDOR" ] && bases="$bases $REAL_VENDOR"
+    [ -n "$REAL_ODM" ] && bases="$bases $REAL_ODM"
+    
+    bases="$bases /system /product /system_ext /vendor /odm"
+    bases=$(echo "$bases" | tr ' ' '\n' | sort -u | tr '\n' ' ')
     
     for base in $bases; do
         [ -z "$base" ] && continue
@@ -326,24 +530,31 @@ delete_item() {
         local path="$base/$clean"
         path=$(echo "$path" | sed 's|//*|/|g')
         
-        if [ -d "$path" ]; then
-            log "Found dir: $path"
+        if [ -d "$path" ] && ! is_symlink "$path"; then
+            log "DELETING DIR: $path"
+            echo "DIR: $path" >> "$DELETE_LOG"
             rm -rf "$path" 2>/dev/null
             if [ ! -d "$path" ]; then
-                log "Deleted dir: $path"
+                log "SUCCESS: Deleted dir: $path"
                 return 2
+            else
+                log "FAILED: Could not delete dir: $path"
             fi
-        elif [ -f "$path" ]; then
-            log "Found file: $path"
+        elif [ -f "$path" ] && ! is_symlink "$path"; then
+            log "DELETING FILE: $path"
+            echo "FILE: $path" >> "$DELETE_LOG"
             rm -f "$path" 2>/dev/null
             if [ ! -f "$path" ]; then
-                log "Deleted file: $path"
+                log "SUCCESS: Deleted file: $path"
                 return 1
+            else
+                log "FAILED: Could not delete file: $path"
             fi
         fi
     done
     
-    log "Not found: $target"
+    log "NOT FOUND: $target"
+    echo "NOT_FOUND: $target" >> "$DELETE_LOG"
     return 0
 }
 
@@ -362,9 +573,15 @@ if [ -s "/tmp/delete.list" ]; then
         esac
     done < "/tmp/delete.list"
     
-    log "Files deleted: $DELETED_FILES, Dirs deleted: $DELETED_DIRS, Not found: $NOT_FOUND"
+    log "========================================="
+    log "DELETION SUMMARY:"
+    log "Files deleted: $DELETED_FILES"
+    log "Dirs deleted: $DELETED_DIRS"
+    log "Not found: $NOT_FOUND"
+    log "========================================="
+    
     ui_print " "
-    ui_print "Summary:"
+    ui_print "Removal Summary:"
     ui_print "  Files deleted: $DELETED_FILES"
     ui_print "  Directories deleted: $DELETED_DIRS"
     [ $NOT_FOUND -gt 0 ] && ui_print "  Not found: $NOT_FOUND"
@@ -373,14 +590,85 @@ else
     ui_print "Nothing to remove"
 fi
 
+if [ $INSTALL_MODE -eq 1 ]; then
+    log ""
+    log "Removing extra Google apps..."
+    log "========================================="
+    ui_print " "
+    ui_print "Removing extra Google apps..."
+    
+    EXTRA_APPS="
+        priv-app/GoogleDialer
+        priv-app/PrebuiltBugle
+        priv-app/PrebuiltDeskClockGoogle_76007351
+    "
+    
+    for app in $EXTRA_APPS; do
+        [ -z "$app" ] && continue
+        
+        for base in "$REAL_PRODUCT" "$REAL_SYSTEM" "$REAL_SYSTEM_EXT"; do
+            [ -z "$base" ] && continue
+            [ ! -d "$base" ] && continue
+            
+            local app_path="$base/$app"
+            
+            if [ -d "$app_path" ] && ! is_symlink "$app_path"; then
+                log "DELETING EXTRA APP: $app_path"
+                echo "EXTRA_DIR: $app_path" >> "$DELETE_LOG"
+                rm -rf "$app_path" 2>/dev/null
+                if [ ! -d "$app_path" ]; then
+                    log "SUCCESS: Deleted extra app: $app_path"
+                    ui_print "  Deleted: $app_path"
+                    DELETED_DIRS=$((DELETED_DIRS + 1))
+                else
+                    log "FAILED: Could not delete extra app: $app_path"
+                fi
+            fi
+        done
+    done
+fi
+
 log ""
 log "Step 4/5: Restoring VANILLA files"
+log "========================================="
 ui_print " "
 ui_print "Step 4/5: Restoring VANILLA files"
 
 cd $TMPDIR
-
 unzip -o "$ZIPFILE" -d . > /dev/null 2>&1
+
+if [ $INSTALL_MODE -eq 1 ]; then
+    log "Removing extra apps from restore files..."
+    ui_print "Removing extra apps from restore..."
+    
+    if [ -d "$TMPDIR/system_ext/priv-app/LineageSetupWizard" ]; then
+        rm -rf "$TMPDIR/system_ext/priv-app/LineageSetupWizard"
+        log "Removed from restore: $TMPDIR/system_ext/priv-app/LineageSetupWizard"
+    fi
+    if [ -d "$TMPDIR/system/priv-app/LineageSetupWizard" ]; then
+        rm -rf "$TMPDIR/system/priv-app/LineageSetupWizard"
+        log "Removed from restore: $TMPDIR/system/priv-app/LineageSetupWizard"
+    fi
+    if [ -d "$TMPDIR/product/priv-app/LineageSetupWizard" ]; then
+        rm -rf "$TMPDIR/product/priv-app/LineageSetupWizard"
+        log "Removed from restore: $TMPDIR/product/priv-app/LineageSetupWizard"
+    fi
+    
+    for app in GoogleDialer PrebuiltBugle PrebuiltDeskClockGoogle_76007351; do
+        if [ -d "$TMPDIR/product/priv-app/$app" ]; then
+            rm -rf "$TMPDIR/product/priv-app/$app"
+            log "Removed from restore: $TMPDIR/product/priv-app/$app"
+        fi
+        if [ -d "$TMPDIR/system/priv-app/$app" ]; then
+            rm -rf "$TMPDIR/system/priv-app/$app"
+            log "Removed from restore: $TMPDIR/system/priv-app/$app"
+        fi
+        if [ -d "$TMPDIR/system_ext/priv-app/$app" ]; then
+            rm -rf "$TMPDIR/system_ext/priv-app/$app"
+            log "Removed from restore: $TMPDIR/system_ext/priv-app/$app"
+        fi
+    done
+fi
 
 log "Extracted contents:"
 for dir in system system_ext product vendor odm; do
@@ -395,6 +683,9 @@ done
 
 TOTAL_RESTORED=0
 TOTAL_FAILED=0
+
+RESTORE_LOG="/tmp/restored_files.log"
+> "$RESTORE_LOG"
 
 restore_dir() {
     local src_dir="$1"
@@ -415,39 +706,66 @@ restore_dir() {
     esac
     
     if [ -z "$target_base" ] || [ ! -d "$target_base" ]; then
-        log "SKIP $name - target not found: $target_base"
+        log "SKIP $name - target partition not found: $target_base"
+        ui_print "SKIP $name - target partition not found"
         return 0
     fi
     
-    log "Restoring $name to $target_base"
+    log "========================================="
+    log "RESTORING $name TO $target_base"
+    log "========================================="
     ui_print "Restoring $name to $target_base"
     
     cd "$src_dir"
-    find . -type f 2>/dev/null | while read -r file; do
-        dest="$target_base/${file#./}"
+    
+    rm -f /tmp/restore_status.txt
+    
+    find . -type f 2>/dev/null | while IFS= read -r file; do
+        rel_path="${file#./}"
+        dest="$target_base/$rel_path"
         dest_dir=$(dirname "$dest")
-        mkdir -p "$dest_dir" 2>/dev/null
+        
+        if [ ! -d "$dest_dir" ]; then
+            mkdir -p "$dest_dir" 2>/dev/null
+            if [ ! -d "$dest_dir" ]; then
+                log "FAILED to create dir: $dest_dir"
+                echo "FAIL: $dest" >> "$RESTORE_LOG"
+                echo "FAIL" >> /tmp/restore_status.txt
+                continue
+            fi
+        fi
+        
         if cp -f "$file" "$dest" 2>/dev/null; then
             chmod 644 "$dest" 2>/dev/null
-            chcon --reference="$src_dir/${file#./}" "$dest" 2>/dev/null
+            chown root:root "$dest" 2>/dev/null
+            chcon --reference="$src_dir/$rel_path" "$dest" 2>/dev/null
+            
+            log "RESTORED: $dest"
+            echo "OK: $dest" >> "$RESTORE_LOG"
             echo "OK" >> /tmp/restore_status.txt
         else
-            log "FAILED: ${file#./}"
+            log "FAILED: $rel_path -> $dest"
+            echo "FAIL: $dest" >> "$RESTORE_LOG"
             echo "FAIL" >> /tmp/restore_status.txt
         fi
     done
     
+    cd /
+    
     if [ -f /tmp/restore_status.txt ]; then
-        ok=$(grep -c 'OK' /tmp/restore_status.txt 2>/dev/null || echo 0)
-        fail=$(grep -c 'FAIL' /tmp/restore_status.txt 2>/dev/null || echo 0)
+        ok=$(grep -c '^OK$' /tmp/restore_status.txt 2>/dev/null || echo 0)
+        fail=$(grep -c '^FAIL$' /tmp/restore_status.txt 2>/dev/null || echo 0)
+        
         TOTAL_RESTORED=$((TOTAL_RESTORED + ok))
         TOTAL_FAILED=$((TOTAL_FAILED + fail))
+        
+        log "----------------------------------------"
+        log "$name SUMMARY: $ok restored, $fail failed"
+        log "----------------------------------------"
+        ui_print "$name: $ok files restored, $fail failed"
+        
         rm -f /tmp/restore_status.txt
-        log "$name: $ok restored, $fail failed"
-        ui_print "$name: $ok restored, $fail failed"
     fi
-    
-    cd /
 }
 
 if [ -d "$TMPDIR/system" ]; then
@@ -470,26 +788,72 @@ if [ -d "$TMPDIR/odm" ]; then
     restore_dir "$TMPDIR/odm" "odm"
 fi
 
+if [ $INSTALL_MODE -eq 1 ]; then
+    log "Removing extra apps from target system..."
+    ui_print "Removing extra apps from target system..."
+    
+    for base in "$REAL_SYSTEM" "$REAL_PRODUCT" "$REAL_SYSTEM_EXT"; do
+        if [ -n "$base" ] && [ -d "$base/priv-app/LineageSetupWizard" ]; then
+            rm -rf "$base/priv-app/LineageSetupWizard"
+            log "Removed: $base/priv-app/LineageSetupWizard"
+            ui_print "Removed: $base/priv-app/LineageSetupWizard"
+        fi
+    done
+    
+    for app in GoogleDialer PrebuiltBugle PrebuiltDeskClockGoogle_76007351; do
+        for base in "$REAL_SYSTEM" "$REAL_PRODUCT" "$REAL_SYSTEM_EXT"; do
+            if [ -n "$base" ] && [ -d "$base/priv-app/$app" ]; then
+                rm -rf "$base/priv-app/$app"
+                log "Removed: $base/priv-app/$app"
+                ui_print "Removed: $base/priv-app/$app"
+            fi
+        done
+    done
+fi
+
 log ""
 log "Step 5/5: Cleanup"
 ui_print " "
 ui_print "Step 5/5: Cleanup"
 
-rm -rf /tmp/gapps_to_vanilla /tmp/delete.list /tmp/restore_status.txt
+cp "$DELETE_LOG" "/tmp/gapps-deleted.log" 2>/dev/null
+cp "$RESTORE_LOG" "/tmp/gapps-restored.log" 2>/dev/null
+
+rm -rf /tmp/gapps_to_vanilla
+rm -f /tmp/delete.list
+rm -f /tmp/restore_status.txt
+rm -f "$DELETE_LOG"
+rm -f "$RESTORE_LOG"
 
 log ""
 log "========================================="
 log "Installation complete"
+log "Mode: $([ $INSTALL_MODE -eq 0 ] && echo 'Full restore' || echo 'Minimal restore (without extra Google apps)')"
 log "Files restored: $TOTAL_RESTORED"
 log "Files failed: $TOTAL_FAILED"
 log "GAPPS deleted: $((DELETED_FILES + DELETED_DIRS))"
+log "========================================="
+log ""
+log "Detailed logs:"
+log "- Deleted files: /tmp/gapps-deleted.log"
+log "- Restored files: /tmp/gapps-restored.log"
 log "========================================="
 
 ui_print " "
 ui_print "========================================="
 ui_print "Installation complete"
 ui_print " "
+ui_print "Mode: $([ $INSTALL_MODE -eq 0 ] && echo 'Full restore' || echo 'Minimal restore')"
 ui_print "GAPPS removed, VANILLA AOSP restored"
+ui_print " "
+ui_print "Summary:"
+ui_print "  Restored: $TOTAL_RESTORED files"
+[ $TOTAL_FAILED -gt 0 ] && ui_print "  Failed: $TOTAL_FAILED files"
+ui_print "  Deleted: $((DELETED_FILES + DELETED_DIRS)) GAPPS items"
+ui_print " "
+ui_print "Detailed logs:"
+ui_print "  /tmp/gapps-deleted.log"
+ui_print "  /tmp/gapps-restored.log"
 ui_print " "
 ui_print "Log saved: /tmp/gapps-to-vanilla.log"
 ui_print "========================================="
