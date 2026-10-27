@@ -337,6 +337,10 @@ priv-app/GoogleDialer
 priv-app/PrebuiltBugle
 priv-app/PrebuiltDeskClockGoogle_76007351
 priv-app/SoundPicker
+priv-app/GooglePackageInstaller
+priv-app/TrebleApp
+app/GooglePrintRecommendationService
+app/GoogleExtShared
 "
 
 # Files to exclude from the vanilla RESTORE set only.
@@ -346,9 +350,6 @@ priv-app/SoundPicker
 # But we also must NOT delete them from the target, since they are part
 # of the GSI itself.
 REMOVE_FROM_RESTORE_ONLY="
-priv-app/TrebleApp/TrebleApp.apk
-priv-app/PackageInstaller/PackageInstaller.apk
-app/PrintRecommendationService/PrintRecommendationService.apk
 app/ExtShared/ExtShared.apk
 apex/com.android.virt.apex
 etc/NOTICE.xml.gz
