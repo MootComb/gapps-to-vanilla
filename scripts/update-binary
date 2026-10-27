@@ -48,7 +48,6 @@ mount_rw() {
     local path="$1"
     local mp="$path"
 
-    # If the path itself is not a mount point, climb up to the nearest one.
     if ! awk -v m="$mp" '$3==m {found=1} END{exit !found}' /proc/mounts; then
         local cur="$path"
         mp=""
@@ -79,8 +78,8 @@ mount_rw() {
     return 1
 }
 
-# Find a partition by looking FIRST at real mount points in /proc/mounts,
-# and only then falling back to directory probing.
+# Find a partition: FIRST look at real mount points in /proc/mounts,
+# THEN fall back to directory probing.
 find_partition() {
     local name="$1"
     log "Searching for $name partition..."
@@ -104,7 +103,6 @@ find_partition() {
         return 0
     fi
 
-    # Fallback: directory probing
     local candidates=""
     case "$name" in
         system)     candidates="/system_root/system /system_root /system /mnt/system" ;;
@@ -184,7 +182,7 @@ ui_print "  System:     $REAL_SYSTEM"
 ui_print " "
 
 # ---------------------------------------------------------------------------
-# Step 1: mount RW (the script does it itself now)
+# Step 1: mount RW
 # ---------------------------------------------------------------------------
 ui_print "Step 1/5: Mounting partitions RW"
 log "Step 1/5: Mounting partitions RW"
@@ -329,14 +327,31 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Minimal mode: extra apps
+# App lists
 # ---------------------------------------------------------------------------
+
+# Apps to remove from target partitions (real Google extras we don't want)
 EXTRA_APPS_LIST="
 priv-app/LineageSetupWizard
 priv-app/GoogleDialer
 priv-app/PrebuiltBugle
 priv-app/PrebuiltDeskClockGoogle_76007351
 priv-app/SoundPicker
+"
+
+# Files to exclude from the vanilla RESTORE set only.
+# We must NOT overwrite these on the target: their signatures differ from
+# the GSI versions already installed, which causes
+# "Signature mismatch" bootloop (observed: me.phh.treble.app).
+# But we also must NOT delete them from the target, since they are part
+# of the GSI itself.
+REMOVE_FROM_RESTORE_ONLY="
+priv-app/TrebleApp/TrebleApp.apk
+priv-app/PackageInstaller/PackageInstaller.apk
+app/PrintRecommendationService/PrintRecommendationService.apk
+app/ExtShared/ExtShared.apk
+apex/com.android.virt.apex
+etc/NOTICE.xml.gz
 "
 
 remove_extra_apps_from_target() {
@@ -377,6 +392,23 @@ log "Step 4/5: Restoring VANILLA files"
 
 cd "$TMPDIR" || abort "Cannot cd to $TMPDIR"
 unzip -o "$ZIPFILE" -d . > /dev/null 2>&1
+
+# ---------------------------------------------------------------------------
+# Filter out non-GApps system files from the restore set.
+# These are part of the GSI and already carry the correct signatures.
+# Overwriting them with vanilla-zip versions causes "Signature mismatch"
+# on boot (observed: me.phh.treble.app in shared user android.uid.system).
+# ---------------------------------------------------------------------------
+log "Filtering non-GApps files from restore set..."
+for f in $REMOVE_FROM_RESTORE_ONLY; do
+    for part in system product system_ext; do
+        target="$TMPDIR/$part/$f"
+        if [ -e "$target" ]; then
+            rm -f "$target"
+            log "Removed from restore (keep GSI version): $part/$f"
+        fi
+    done
+done
 
 if [ $INSTALL_MODE -eq 1 ]; then
     log "Removing extra apps from restore files..."
@@ -483,7 +515,7 @@ if [ $INSTALL_MODE -eq 1 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Step 5: cleanup + IMPORTANT: remount back to RO
+# Step 5: cleanup + remount back to RO
 # ---------------------------------------------------------------------------
 ui_print " "
 ui_print "Step 5/5: Cleanup"
