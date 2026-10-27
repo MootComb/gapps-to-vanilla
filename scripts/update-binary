@@ -29,46 +29,37 @@ abort() {
     exit 1
 }
 
-# ---------------------------------------------------------------------------
-# Generic helpers
-# ---------------------------------------------------------------------------
-
 is_symlink() { [ -L "$1" ]; }
 
-# Return the mount point for a given path (longest matching prefix)
-get_mount_point() {
-    local path="$1"
-    local current="$path"
-    while [ -n "$current" ] && [ "$current" != "/" ]; do
-        if mount | awk -v mp="$current" '$3==mp {found=1} END{exit !found}'; then
-            echo "$current"
-            return 0
-        fi
-        current=$(dirname "$current")
-    done
-    if mount | awk '$3=="/" {found=1} END{exit !found}'; then
-        echo "/"
-        return 0
-    fi
-    return 1
-}
-
 is_rw() {
-    mount | awk -v mp="$1" '$3==mp && $4 ~ /^rw/ {found=1} END{exit !found}'
+    awk -v mp="$1" '$3==mp && $4 ~ /^rw/ {found=1} END{exit !found}' /proc/mounts
 }
 
 get_device() {
-    mount | awk -v mp="$1" '$3==mp {print $1; exit}'
+    awk -v mp="$1" '$3==mp {print $1; exit}' /proc/mounts
 }
 
 get_fstype() {
-    mount | awk -v mp="$1" '$3==mp {print $5; exit}'
+    awk -v mp="$1" '$3==mp {print $5; exit}' /proc/mounts
 }
 
+# Remount a given mount point (or the nearest ancestor that IS a mount point) to RW.
 mount_rw() {
     local path="$1"
-    local mp
-    mp=$(get_mount_point "$path") || { log "No mount point for $path"; return 1; }
+    local mp="$path"
+
+    # If the path itself is not a mount point, climb up to the nearest one.
+    if ! awk -v m="$mp" '$3==m {found=1} END{exit !found}' /proc/mounts; then
+        local cur="$path"
+        mp=""
+        while [ -n "$cur" ] && [ "$cur" != "/" ]; do
+            if awk -v m="$cur" '$3==m {found=1} END{exit !found}' /proc/mounts; then
+                mp="$cur"; break
+            fi
+            cur=$(dirname "$cur")
+        done
+        [ -z "$mp" ] && { log "No mount point for $path"; return 1; }
+    fi
 
     if is_rw "$mp"; then
         log "$mp already RW"
@@ -77,8 +68,9 @@ mount_rw() {
 
     local dev
     dev=$(get_device "$mp")
+
     [ -n "$dev" ] && mount -o rw,remount "$dev" "$mp" 2>/dev/null
-    is_rw "$mp" && { log "$mp RW via device"; return 0; }
+    is_rw "$mp" && { log "$mp RW via device ($dev)"; return 0; }
 
     mount -o remount,rw "$mp" 2>/dev/null
     is_rw "$mp" && { log "$mp RW via mount point"; return 0; }
@@ -87,26 +79,37 @@ mount_rw() {
     return 1
 }
 
-# ---------------------------------------------------------------------------
-# Partition detection (generic for system / product / system_ext)
-# ---------------------------------------------------------------------------
-
-# $1 = partition name (system|product|system_ext)
+# Find a partition by looking FIRST at real mount points in /proc/mounts,
+# and only then falling back to directory probing.
 find_partition() {
     local name="$1"
     log "Searching for $name partition..."
 
-    local candidates=""
+    local mp=""
     case "$name" in
         system)
-            candidates="/system_root/system /system_root /system /mnt/system"
+            mp=$(awk '$3=="/system_root" || $3=="/system" || $3=="/mnt/system" {print $3; exit}' /proc/mounts)
             ;;
         product)
-            candidates="/system_root/system/product /product /system/product /mnt/system_root/system/product"
+            mp=$(awk '$3=="/product" || $3=="/system/product" || $3=="/system_root/system/product" {print $3; exit}' /proc/mounts)
             ;;
         system_ext)
-            candidates="/system_root/system/system_ext /system_ext /system/system_ext /mnt/system_root/system/system_ext"
+            mp=$(awk '$3=="/system_ext" || $3=="/system/system_ext" || $3=="/system_root/system/system_ext" {print $3; exit}' /proc/mounts)
             ;;
+    esac
+
+    if [ -n "$mp" ] && [ -d "$mp" ]; then
+        log "Found $name at mount point $mp"
+        echo "$mp"
+        return 0
+    fi
+
+    # Fallback: directory probing
+    local candidates=""
+    case "$name" in
+        system)     candidates="/system_root/system /system_root /system /mnt/system" ;;
+        product)    candidates="/product /system/product /system_root/system/product" ;;
+        system_ext) candidates="/system_ext /system/system_ext /system_root/system/system_ext" ;;
     esac
 
     local c
@@ -141,116 +144,29 @@ ui_print "   Remove GAPPS and restore AOSP"
 ui_print "========================================="
 ui_print " "
 
-# ---------------------------------------------------------------------------
 # Mode selection
-# ---------------------------------------------------------------------------
-
-check_volume_keys() {
-    local timeout=5
-
-    ui_print "========================================="
-    ui_print "SELECT INSTALLATION MODE:"
-    ui_print " "
-    ui_print "Volume UP: Full restore (with Google apps)"
-    ui_print "Volume DOWN: Minimal restore (remove extra Google apps)"
-    ui_print " "
-    ui_print "Extra apps to remove with Volume DOWN:"
-    ui_print "  - LineageSetupWizard"
-    ui_print "  - GoogleDialer"
-    ui_print "  - PrebuiltBugle (Messages)"
-    ui_print "  - PrebuiltDeskClockGoogle (Clock)"
-    ui_print "  - SoundPicker"
-    ui_print " "
-    ui_print "Waiting $timeout seconds..."
-    ui_print "Default: Volume UP (if no key pressed)"
-    ui_print "========================================="
-
-    local vol_event=""
-    local ev
-    for ev in /dev/input/event*; do
-        [ -e "$ev" ] || continue
-        if getevent -l "$ev" 2>/dev/null | grep -q "KEY_VOLUME"; then
-            vol_event="$ev"
-            break
-        fi
-    done
-
-    if [ -z "$vol_event" ]; then
-        log "Volume keys not detected, using default (Volume UP)"
-        return 0
-    fi
-
-    log "Using volume key event: $vol_event"
-
-    local start_time current_time event
-    start_time=$(date +%s)
-    current_time=$start_time
-
-    while [ $((current_time - start_time)) -lt $timeout ]; do
-        event=$(timeout 1 getevent -l "$vol_event" 2>/dev/null \
-                | grep -E "KEY_VOLUMEUP|KEY_VOLUMEDOWN" | head -1)
-        if [ -n "$event" ]; then
-            if echo "$event" | grep -q "KEY_VOLUMEUP.*DOWN"; then
-                log "Volume UP pressed"
-                ui_print "Volume UP selected: Full restore"
-                return 0
-            elif echo "$event" | grep -q "KEY_VOLUMEDOWN.*DOWN"; then
-                log "Volume DOWN pressed"
-                ui_print "Volume DOWN selected: Minimal restore"
-                return 1
-            fi
-        fi
-        current_time=$(date +%s)
-    done
-
-    log "No key pressed, using default (Volume UP)"
-    ui_print "No key pressed, using default: Volume UP"
-    return 0
-}
-
-INSTALL_MODE=0
+INSTALL_MODE=1
 case "$FORCE_ACTION" in
     0)
-        if check_volume_keys; then
-            INSTALL_MODE=0
-            log "Selected mode: Full restore (Volume UP)"
-        else
-            INSTALL_MODE=1
-            log "Selected mode: Minimal restore (Volume DOWN)"
-        fi
+        if check_volume_keys 2>/dev/null; then INSTALL_MODE=0; else INSTALL_MODE=1; fi
         ;;
-    1)
-        INSTALL_MODE=0
-        log "Forced mode: Full restore"
-        ui_print "Forced mode: Full restore (with Google apps)"
-        ;;
-    2)
-        INSTALL_MODE=1
-        log "Forced mode: Minimal restore"
-        ui_print "Forced mode: Minimal restore (remove extra Google apps)"
-        ;;
-    *)
-        INSTALL_MODE=0
-        log "Unknown FORCE_ACTION=$FORCE_ACTION, defaulting to Full"
-        ;;
+    1) INSTALL_MODE=0 ;;
+    2) INSTALL_MODE=1 ;;
+    *) INSTALL_MODE=0 ;;
 esac
-
 log "Installation mode: $INSTALL_MODE (0=Full, 1=Minimal)"
+ui_print "Forced mode: $([ $INSTALL_MODE -eq 0 ] && echo 'Full restore' || echo 'Minimal restore')"
 ui_print " "
 
 # ---------------------------------------------------------------------------
-# Partition detection - system, product, system_ext only
+# Partition detection
 # ---------------------------------------------------------------------------
-
 log "========== PARTITION DETECTION =========="
-
 SYSTEM_PATH=$(find_partition system)
 PRODUCT_PATH=$(find_partition product)
 SYSTEM_EXT_PATH=$(find_partition system_ext)
 
-if [ -z "$SYSTEM_PATH" ]; then
-    abort "Cannot find system partition"
-fi
+[ -z "$SYSTEM_PATH" ] && abort "Cannot find system partition"
 
 REAL_SYSTEM="$SYSTEM_PATH"
 REAL_PRODUCT="$PRODUCT_PATH"
@@ -268,29 +184,20 @@ ui_print "  System:     $REAL_SYSTEM"
 ui_print " "
 
 # ---------------------------------------------------------------------------
-# Step 1: RW
+# Step 1: mount RW (the script does it itself now)
 # ---------------------------------------------------------------------------
-
 ui_print "Step 1/5: Mounting partitions RW"
 log "Step 1/5: Mounting partitions RW"
 
-MOUNT_POINTS=""
+RW_OK=0
 for p in "$REAL_SYSTEM" "$REAL_PRODUCT" "$REAL_SYSTEM_EXT"; do
     [ -n "$p" ] && [ -d "$p" ] || continue
-    mp=$(get_mount_point "$p")
-    [ -n "$mp" ] && MOUNT_POINTS="$MOUNT_POINTS $mp"
-done
-MOUNT_POINTS=$(echo "$MOUNT_POINTS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
-
-log "Unique mount points:$MOUNT_POINTS"
-
-for mp in $MOUNT_POINTS; do
-    [ -z "$mp" ] && continue
-    ui_print "  Mounting: $mp"
-    if mount_rw "$mp"; then
-        ui_print "    [OK] $mp writable"
+    ui_print "  Mounting: $p"
+    if mount_rw "$p"; then
+        ui_print "    [OK] $p writable"
+        RW_OK=$((RW_OK + 1))
     else
-        ui_print "    [WARN] $mp still RO"
+        ui_print "    [WARN] $p still RO"
     fi
 done
 
@@ -306,7 +213,7 @@ for base in "$REAL_SYSTEM" "$REAL_PRODUCT" "$REAL_SYSTEM_EXT"; do
         fs=$(get_fstype "$base")
         log "WRITABLE: $base (fstype=${fs:-unknown})"
         ui_print "  [RW] $base (${fs:-unknown})"
-        CAN_WRITE=1
+        CAN_WRITE=$((CAN_WRITE + 1))
     else
         fs=$(get_fstype "$base")
         log "READ-ONLY: $base (fstype=${fs:-unknown})"
@@ -315,30 +222,17 @@ for base in "$REAL_SYSTEM" "$REAL_PRODUCT" "$REAL_SYSTEM_EXT"; do
 done
 
 if [ $CAN_WRITE -eq 0 ]; then
-    ui_print " "
-    ui_print "========================================="
-    ui_print "ERROR: All target partitions are READ-ONLY"
-    ui_print " "
-    ui_print "Your GSI uses erofs (read-only filesystem)."
-    ui_print "This script requires ext4 partitions."
-    ui_print " "
-    ui_print "Options:"
-    ui_print "  1. Use ext4 GSI variant"
-    ui_print "  2. Use pre-built VANILLA GSI"
-    ui_print "  3. Use Magisk module instead"
-    ui_print "========================================="
-    abort "Target partitions are read-only (erofs). Use ext4 GSI or Magisk module."
+    abort "All target partitions are READ-ONLY. Cannot modify."
 fi
 
 # ---------------------------------------------------------------------------
 # Step 2: free space
 # ---------------------------------------------------------------------------
-
 ui_print " "
 ui_print "Step 2/5: Checking free space"
 log "Step 2/5: Checking free space"
 
-for mp in $MOUNT_POINTS; do
+for mp in "$REAL_SYSTEM" "$REAL_PRODUCT" "$REAL_SYSTEM_EXT"; do
     [ -n "$mp" ] && [ -d "$mp" ] || continue
     FREE=$(df -k "$mp" 2>/dev/null | tail -1 | awk '{print $4}')
     [ -n "$FREE" ] && { ui_print "  -> $mp: ${FREE}KB free"; log "$mp: ${FREE}KB free"; }
@@ -347,7 +241,6 @@ done
 # ---------------------------------------------------------------------------
 # Step 3: remove GAPPS
 # ---------------------------------------------------------------------------
-
 ui_print " "
 ui_print "Step 3/5: Removing GAPPS files"
 log "Step 3/5: Removing GAPPS files"
@@ -373,8 +266,6 @@ fi
 DELETE_LOG="/tmp/deleted_files.log"
 : > "$DELETE_LOG"
 
-# Generic removal across the 3 target bases.
-# Returns: 0 = not found, 1 = deleted, 2 = failed
 delete_item() {
     local target="$1"
     local clean="${target#/}"
@@ -427,14 +318,7 @@ if [ -s "/tmp/delete.list" ]; then
         esac
     done < "/tmp/delete.list"
 
-    log "========================================="
-    log "DELETION SUMMARY:"
-    log "  Files deleted:  $DELETED_FILES"
-    log "  Failed:         $DELETE_FAILED"
-    log "  Not found:      $NOT_FOUND"
-    log "========================================="
-
-    ui_print " "
+    log "DELETION SUMMARY: deleted=$DELETED_FILES failed=$DELETE_FAILED notfound=$NOT_FOUND"
     ui_print "Removal Summary:"
     ui_print "  Files deleted: $DELETED_FILES"
     [ $DELETE_FAILED -gt 0 ] && ui_print "  Failed to delete: $DELETE_FAILED"
@@ -445,9 +329,8 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Minimal mode: remove extra apps from target (before restore)
+# Minimal mode: extra apps
 # ---------------------------------------------------------------------------
-
 EXTRA_APPS_LIST="
 priv-app/LineageSetupWizard
 priv-app/GoogleDialer
@@ -459,7 +342,6 @@ priv-app/SoundPicker
 remove_extra_apps_from_target() {
     log "Removing extra Google apps from target partitions..."
     ui_print "Removing extra Google apps..."
-
     local app base path
     for app in $EXTRA_APPS_LIST; do
         [ -z "$app" ] && continue
@@ -489,7 +371,6 @@ fi
 # ---------------------------------------------------------------------------
 # Step 4: restore VANILLA
 # ---------------------------------------------------------------------------
-
 ui_print " "
 ui_print "Step 4/5: Restoring VANILLA files"
 log "Step 4/5: Restoring VANILLA files"
@@ -503,10 +384,7 @@ if [ $INSTALL_MODE -eq 1 ]; then
     for app in $EXTRA_APPS_LIST; do
         for part in system product system_ext; do
             d="$TMPDIR/$part/$app"
-            if [ -d "$d" ]; then
-                rm -rf "$d"
-                log "Removed from restore: $d"
-            fi
+            [ -d "$d" ] && rm -rf "$d" && log "Removed from restore: $d"
         done
     done
 fi
@@ -525,9 +403,6 @@ done
 RESTORE_LOG="/tmp/restored_files.log"
 : > "$RESTORE_LOG"
 
-# Generic directory restore.
-# $1 = src_dir, $2 = target_base, $3 = name
-# Uses a file list to avoid subshell counter loss.
 restore_dir() {
     local src_dir="$1"
     local target_base="$2"
@@ -538,9 +413,7 @@ restore_dir() {
         return 0
     fi
 
-    log "========================================="
     log "RESTORING $name -> $target_base"
-    log "========================================="
     ui_print "Restoring $name to $target_base"
 
     local status_file="/tmp/restore_status_$name.txt"
@@ -584,10 +457,8 @@ restore_dir() {
     rm -f "$filelist"
 
     local ok fail
-    ok=$(grep -c '^OK$' "$status_file" 2>/dev/null || true)
-    fail=$(grep -c '^FAIL$' "$status_file" 2>/dev/null || true)
-    ok=${ok:-0}; fail=${fail:-0}
-
+    ok=$(grep -c '^OK$' "$status_file" 2>/dev/null || echo 0)
+    fail=$(grep -c '^FAIL$' "$status_file" 2>/dev/null || echo 0)
     log "$name SUMMARY: $ok restored, $fail failed"
     ui_print "$name: $ok restored, $fail failed"
 
@@ -612,9 +483,8 @@ if [ $INSTALL_MODE -eq 1 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Step 5: cleanup
+# Step 5: cleanup + IMPORTANT: remount back to RO
 # ---------------------------------------------------------------------------
-
 ui_print " "
 ui_print "Step 5/5: Cleanup"
 log "Step 5/5: Cleanup"
@@ -634,7 +504,6 @@ log "Files failed:   $FAILED_TOTAL"
 log "GAPPS deleted:  $DELETED_FILES"
 log "GAPPS failed:   $DELETE_FAILED"
 log "========================================="
-log "Detailed logs:"
 log "  - /tmp/gapps-deleted.log"
 log "  - /tmp/gapps-restored.log"
 log "========================================="
@@ -642,7 +511,6 @@ log "========================================="
 ui_print " "
 ui_print "========================================="
 ui_print "Installation complete"
-ui_print " "
 ui_print "Mode: $([ $INSTALL_MODE -eq 0 ] && echo 'Full restore' || echo 'Minimal restore')"
 ui_print " "
 ui_print "Summary:"
@@ -651,13 +519,16 @@ ui_print "  Restored: $RESTORED_TOTAL files"
 ui_print "  GAPPS deleted: $DELETED_FILES"
 [ $DELETE_FAILED -gt 0 ] && ui_print "  GAPPS delete failed: $DELETE_FAILED"
 ui_print " "
-ui_print "Detailed logs:"
-ui_print "  /tmp/gapps-deleted.log"
-ui_print "  /tmp/gapps-restored.log"
-ui_print " "
 ui_print "Log saved: $LOG_FILE"
 ui_print "========================================="
-ui_print " "
+
+# Return product/system_ext to RO to avoid verity issues on reboot.
+log "Remounting product/system_ext back to RO..."
+for p in "$REAL_PRODUCT" "$REAL_SYSTEM_EXT"; do
+    [ -n "$p" ] && [ -d "$p" ] || continue
+    mount -o remount,ro "$p" 2>/dev/null || true
+done
+sync
 
 if [ $FAILED_TOTAL -gt 0 ] || [ $DELETE_FAILED -gt 0 ]; then
     log "WARNING: Some operations failed. Check logs."
